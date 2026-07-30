@@ -23,8 +23,7 @@ jobs:
 
       - name: Install package with test deps
         run: |
-          pip install -e ".[all]"
-          pip install pytest pytest-cov hypothesis
+          pip install -e ".[binance,alpaca,polygon,ibkr,dev]"
 
       - name: Lint with ruff
         run: ruff check src/ tests/
