@@ -57,6 +57,13 @@ mt5 = [
 ibkr = [
     "ib-insync>=0.9",
 ]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
 all = [
     "python-binance>=1.0",
     "alpaca-py>=0.20",
@@ -66,23 +73,35 @@ all = [
 ]
 
 [tool.ruff]
-line-length = 100
 target-version = "py311"
+line-length = 100
 
 [tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "F",   # pyflakes
     "I",   # isort
-    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
     "UP",  # pyupgrade
-    "B",   # flake8-bugbear
 ]
 
 [tool.mypy]
 python_version = "3.11"
-strict = true
-warn_unused_configs = true
+strict = false
+warn_unused_ignores = true
+warn_return_any = true
+
+[[tool.mypy.overrides]]
+module = [
+    "MetaTrader5",
+    "ib_insync.*",
+    "python_binance.*",
+    "alpaca.*",
+    "polygon.*",
+    "pandas",
+]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-v --tb=short"

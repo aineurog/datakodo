@@ -4,12 +4,16 @@ Zero setup, fast columnar reads, no server required.
 Data is partitioned by symbol and date for query performance.
 """
 
+from pathlib import Path
 
-class ParquetBackend:
+from datakodo.core.interfaces import StorageBackend
+
+
+class ParquetBackend(StorageBackend):
     """Local Parquet storage implementing the StorageBackend interface."""
 
     def __init__(self, base_dir: str = "datakodo_cache") -> None:
-        self._base_dir = base_dir
+        self._base_dir = Path(base_dir)
 
     def write(self, key: str, data: object) -> None:
         """Write data to a Parquet file keyed by *key*."""

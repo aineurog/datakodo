@@ -6,7 +6,7 @@ always re-fetched live.
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 @dataclass
@@ -22,9 +22,7 @@ class CacheEntry:
     expiry: datetime | None = None
 
 
-def build_cache_key(
-    provider: str, symbol: str, timeframe: str, date_range: tuple[str, str]
-) -> str:
+def build_cache_key(provider: str, symbol: str, timeframe: str, date_range: tuple[str, str]) -> str:
     """Build a deterministic cache key from provider and query parameters.
 
     The key is provider-specific since data quality and adjustments can
@@ -40,7 +38,7 @@ def is_bar_closed(timestamp: datetime, timeframe: str) -> bool:
     A bar is closed when its end time is in the past relative to now.
     The current (still-forming) bar is always open.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return timestamp < now
 
 
@@ -54,7 +52,7 @@ def compute_expiry(timeframe: str) -> datetime:
     minute_frames = {"1m", "5m", "15m", "30m"}
     hour_frames = {"1h", "4h"}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if timeframe in minute_frames:
         return now + timedelta(minutes=5)
     elif timeframe in hour_frames:

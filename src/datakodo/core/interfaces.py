@@ -30,9 +30,7 @@ class AdapterInterface(ABC):
     # --- historical (sync) ---
 
     @abstractmethod
-    def fetch_ohlcv(
-        self, symbol: str, timeframe: str, start: Any, end: Any
-    ) -> Any:
+    def fetch_ohlcv(self, symbol: str, timeframe: str, start: Any, end: Any) -> Any:
         """Fetch OHLCV candles for a date range. Always sync/blocking."""
 
     # --- streaming (async) ---
@@ -81,6 +79,4 @@ def check_capability(adapter: AdapterInterface, capability: str) -> None:
         )
 
     if not getattr(adapter, capability, False):
-        raise NotSupportedError(
-            f"{adapter.__class__.__name__} does not support {capability!r}."
-        )
+        raise NotSupportedError(f"{adapter.__class__.__name__} does not support {capability!r}.")

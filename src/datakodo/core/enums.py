@@ -1,9 +1,9 @@
 """Core enumerations used across all adapters and schemas."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class AssetClass(str, Enum):
+class AssetClass(StrEnum):
     CRYPTO = "crypto"
     EQUITY = "equity"
     FOREX = "forex"
@@ -14,7 +14,7 @@ class AssetClass(str, Enum):
     CFD = "cfd"
 
 
-class InstrumentType(str, Enum):
+class InstrumentType(StrEnum):
     SPOT = "spot"
     PERPETUAL = "perpetual"
     FUTURE = "future"
@@ -22,7 +22,7 @@ class InstrumentType(str, Enum):
     CFD = "cfd"
 
 
-class Timeframe(str, Enum):
+class Timeframe(StrEnum):
     M1 = "1m"
     M5 = "5m"
     M15 = "15m"
@@ -34,7 +34,7 @@ class Timeframe(str, Enum):
     MN1 = "1mo"
 
 
-class Session(str, Enum):
+class Session(StrEnum):
     PRE_MARKET = "pre_market"
     REGULAR = "regular"
     POST_MARKET = "post_market"

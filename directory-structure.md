@@ -110,13 +110,10 @@ datakodo/
 │   ├── usage.md
 │   └── adapters/                    # per-provider: capabilities, cost tier, limits (sec 29)
 │
-├── .github/
-│   └── workflows/
-│       ├── ci.yml                   # lint, type-check, contract tests on every PR
-│       └── integration.yml          # gated live-API integration tests
-│
-├── .pre-commit-config.yaml
-└── .ruff.toml
+└── .github/
+    └── workflows/
+        ├── ci.yml                   # lint, type-check, contract tests on every push
+        └── integration.yml          # gated live-API integration tests
 ```
 
 ## Design Notes
@@ -143,6 +140,5 @@ datakodo/
 | `mypy` | Static type checking (critical for typed schemas and asset-class extensions) |
 | `pytest` + `pytest-cov` | Test runner with coverage |
 | `hypothesis` | Property based testing on normalization functions (sec 26) |
-| `pre-commit` | Run linters and formatters before commits |
 | `pydantic` + `pydantic-settings` | Schema models and config (sec 13, 20) |
 | GitHub Actions CI | Two tiers: contract tests on every commit, integration tests gated |

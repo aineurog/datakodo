@@ -8,9 +8,7 @@ logic, not just a sanity check on data quality.
 import pandas as pd
 
 
-def adjust_ohlcv_for_splits(
-    df: pd.DataFrame, split_history: list[dict]
-) -> pd.DataFrame:
+def adjust_ohlcv_for_splits(df: pd.DataFrame, split_history: list[dict]) -> pd.DataFrame:
     """Back-adjust OHLCV prices for stock splits.
 
     Args:
@@ -32,6 +30,8 @@ def adjust_ohlcv_for_splits(
 
     for split in splits:
         split_date = pd.Timestamp(split["date"])
+        if split_date.tz is None and df["timestamp"].dt.tz is not None:
+            split_date = split_date.tz_localize("UTC")
         ratio = float(split["ratio"])
 
         mask = df["timestamp"] < split_date
@@ -43,9 +43,7 @@ def adjust_ohlcv_for_splits(
     return df
 
 
-def adjust_ohlcv_for_dividends(
-    df: pd.DataFrame, dividend_history: list[dict]
-) -> pd.DataFrame:
+def adjust_ohlcv_for_dividends(df: pd.DataFrame, dividend_history: list[dict]) -> pd.DataFrame:
     """Back-adjust OHLCV prices for cash dividends.
 
     Uses the standard approach of scaling prices by (close_before -
@@ -68,6 +66,8 @@ def adjust_ohlcv_for_dividends(
 
     for div in divs:
         ex_date = pd.Timestamp(div["ex_date"])
+        if ex_date.tz is None and df["timestamp"].dt.tz is not None:
+            ex_date = ex_date.tz_localize("UTC")
         amount = float(div["amount"])
 
         mask = df["timestamp"] < ex_date

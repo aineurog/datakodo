@@ -21,15 +21,15 @@ BINANCE_MAP: dict[Timeframe, str] = {
 
 # Canonical -> MT5 (MetaTrader 5 constants)
 MT5_MAP: dict[Timeframe, int] = {
-    Timeframe.M1: 1,     # TIMEFRAME_M1
-    Timeframe.M5: 5,     # TIMEFRAME_M5
-    Timeframe.M15: 15,   # TIMEFRAME_M15
-    Timeframe.M30: 30,   # TIMEFRAME_M30
-    Timeframe.H1: 16385, # TIMEFRAME_H1
-    Timeframe.H4: 16388, # TIMEFRAME_H4
-    Timeframe.D1: 16408, # TIMEFRAME_D1
-    Timeframe.W1: 32769, # TIMEFRAME_W1
-    Timeframe.MN1: 49153,# TIMEFRAME_MN1
+    Timeframe.M1: 1,  # TIMEFRAME_M1
+    Timeframe.M5: 5,  # TIMEFRAME_M5
+    Timeframe.M15: 15,  # TIMEFRAME_M15
+    Timeframe.M30: 30,  # TIMEFRAME_M30
+    Timeframe.H1: 16385,  # TIMEFRAME_H1
+    Timeframe.H4: 16388,  # TIMEFRAME_H4
+    Timeframe.D1: 16408,  # TIMEFRAME_D1
+    Timeframe.W1: 32769,  # TIMEFRAME_W1
+    Timeframe.MN1: 49153,  # TIMEFRAME_MN1
 }
 
 # Canonical -> IBKR duration strings
