@@ -1,1 +1,8 @@
 project-doc/
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+dist/
+build/
