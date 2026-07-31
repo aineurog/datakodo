@@ -2,14 +2,15 @@
 
 import json
 import random
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
+from datakodo.adapters.binance.rest import BinanceREST
 
 FIXTURES = Path(__file__).parent.parent.parent / "fixtures" / "binance"
 
@@ -144,16 +145,71 @@ class TestBinanceMapper:
         assert trade.side == "sell"
 
 
+class TestBinanceRest:
+    def test_client_init_no_ping_and_timeout(self):
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            BinanceREST("key", "secret", timeout=5.0)
+        client_cls.assert_called_once_with(
+            "key",
+            "secret",
+            requests_params={"timeout": 5.0},
+            ping=False,
+        )
+
+    def test_default_empty_credentials(self):
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            BinanceREST()
+        client_cls.assert_called_once_with(
+            "",
+            "",
+            requests_params={"timeout": 10.0},
+            ping=False,
+        )
+
+    def test_klines_returns_raw_rows_from_client(self):
+        raw = [["1704067200000", "42000.0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]]
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            client_cls.return_value.get_klines.return_value = raw
+            rest = BinanceREST()
+            result = rest.klines("BTCUSDT", "1h")
+        assert result == raw
+        client_cls.return_value.get_klines.assert_called_once_with(
+            symbol="BTCUSDT", interval="1h", limit=1000
+        )
+
+    def test_klines_start_end_converted_to_epoch_ms(self):
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            rest = BinanceREST()
+            rest.klines("BTCUSDT", "1h", start, end)
+        client_cls.return_value.get_klines.assert_called_once_with(
+            symbol="BTCUSDT",
+            interval="1h",
+            limit=1000,
+            startTime=1704067200000,
+            endTime=1704153600000,
+        )
+
+    def test_klines_naive_datetime_assumed_utc(self):
+        start = datetime(2024, 1, 1)
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            rest = BinanceREST()
+            rest.klines("BTCUSDT", "1h", start=start)
+        kwargs = client_cls.return_value.get_klines.call_args.kwargs
+        assert kwargs["startTime"] == 1704067200000
+
+    def test_klines_without_start_end_omits_time_params(self):
+        with patch("datakodo.adapters.binance.rest.Client") as client_cls:
+            rest = BinanceREST()
+            rest.klines("BTCUSDT", "1h")
+        kwargs = client_cls.return_value.get_klines.call_args.kwargs
+        assert "startTime" not in kwargs
+        assert "endTime" not in kwargs
+
+
 class TestBinanceAdapter:
     def test_adapter_capabilities(self):
         adapter = BinanceAdapter()
         assert adapter.supports_ohlcv is True
         assert adapter.supports_streaming_orderbook is True
-
-    def test_fetch_ohlcv_not_implemented_yet(self):
-        from datetime import datetime
-
-        adapter = BinanceAdapter()
-        now = datetime.now(UTC)
-        with pytest.raises(NotImplementedError):
-            adapter.fetch_ohlcv("BTCUSDT", "1h", now, now)
