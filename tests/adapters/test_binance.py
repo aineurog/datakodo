@@ -1,12 +1,16 @@
 """Binance adapter tests."""
 
+import argparse
 import json
+import os
 import random
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
@@ -213,3 +217,53 @@ class TestBinanceAdapter:
         adapter = BinanceAdapter()
         assert adapter.supports_ohlcv is True
         assert adapter.supports_streaming_orderbook is True
+
+
+def live_klines(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    *,
+    interval: str = "1h",
+    limit: int = 5,
+) -> list:
+    """Live smoke check against the real Binance API.
+
+    Reads DATAKODO_BINANCE_API_KEY / DATAKODO_BINANCE_API_SECRET from .env.
+    klines() is a public endpoint, so it works even with empty keys.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    rest = BinanceREST(
+        os.getenv("DATAKODO_BINANCE_API_KEY") or "",
+        os.getenv("DATAKODO_BINANCE_API_SECRET") or "",
+    )
+    rows = rest.klines(symbol, interval, start=start, end=end, limit=limit)
+    print(f"Got {len(rows)} klines for {symbol} {interval}")
+    for row in rows:
+        print(row[:6])
+    return rows
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        parser = argparse.ArgumentParser(
+            description="Live BinanceREST smoke test. Usage: python test_binance.py SYMBOL START END"
+        )
+        parser.add_argument("symbol", help="e.g. BTCUSDT")
+        parser.add_argument("start", help="start date, e.g. 2024-01-01")
+        parser.add_argument("end", help="end date, e.g. 2024-01-02")
+        parser.add_argument("--interval", default="1h", help="kline interval (default 1h)")
+        parser.add_argument("--limit", type=int, default=5, help="candles to fetch (default 5)")
+        args = parser.parse_args()
+
+        live_klines(
+            args.symbol,
+            datetime.fromisoformat(args.start),
+            datetime.fromisoformat(args.end),
+            interval=args.interval,
+            limit=args.limit,
+        )
+    else:
+        sys.exit(pytest.main([__file__]))
