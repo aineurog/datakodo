@@ -218,6 +218,43 @@ class TestBinanceAdapter:
         assert adapter.supports_ohlcv is True
         assert adapter.supports_streaming_orderbook is True
 
+    def test_fetch_ohlcv_returns_canonical_dataframe(self):
+        with patch("datakodo.adapters.binance.adapter.BinanceREST") as rest_cls:
+            rest_cls.return_value.klines.return_value = KLINES_1H
+            adapter = BinanceAdapter()
+            df = adapter.fetch_ohlcv(
+                "BTCUSDT", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+            )
+        assert list(df.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "session",
+        ]
+        assert len(df) == len(KLINES_1H)
+        assert df.loc[0, "open"] == float(KLINES_1H[0][1])
+
+    def test_fetch_ohlcv_delegates_symbol_timeframe_start_end(self):
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
+        with patch("datakodo.adapters.binance.adapter.BinanceREST") as rest_cls:
+            rest_cls.return_value.klines.return_value = []
+            adapter = BinanceAdapter()
+            adapter.fetch_ohlcv("BTCUSDT", "1h", start, end)
+        rest_cls.return_value.klines.assert_called_once_with("BTCUSDT", "1h", start, end)
+
+    def test_fetch_ohlcv_empty_returns_empty_dataframe(self):
+        with patch("datakodo.adapters.binance.adapter.BinanceREST") as rest_cls:
+            rest_cls.return_value.klines.return_value = []
+            adapter = BinanceAdapter()
+            df = adapter.fetch_ohlcv(
+                "BTCUSDT", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+            )
+        assert df.empty
+
 
 def live_klines(
     symbol: str,
@@ -226,7 +263,8 @@ def live_klines(
     *,
     interval: str = "1h",
     limit: int = 5,
-) -> list:
+    as_df: bool = False,
+):
     """Live smoke check against the real Binance API.
 
     Reads DATAKODO_BINANCE_API_KEY / DATAKODO_BINANCE_API_SECRET from .env.
@@ -235,10 +273,15 @@ def live_klines(
     from dotenv import load_dotenv
 
     load_dotenv()
-    rest = BinanceREST(
-        os.getenv("DATAKODO_BINANCE_API_KEY") or "",
-        os.getenv("DATAKODO_BINANCE_API_SECRET") or "",
-    )
+    key = os.getenv("DATAKODO_BINANCE_API_KEY") or ""
+    secret = os.getenv("DATAKODO_BINANCE_API_SECRET") or ""
+    if as_df:
+        adapter = BinanceAdapter(key, secret)
+        df = adapter.fetch_ohlcv(symbol, interval, start, end)
+        print(f"Got {len(df)} candles for {symbol} {interval} (canonical OHLCV)")
+        print(df.head(limit))
+        return df
+    rest = BinanceREST(key, secret)
     rows = rest.klines(symbol, interval, start=start, end=end, limit=limit)
     print(f"Got {len(rows)} klines for {symbol} {interval}")
     for row in rows:
@@ -249,13 +292,16 @@ def live_klines(
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         parser = argparse.ArgumentParser(
-            description="Live BinanceREST smoke test. Usage: python test_binance.py SYMBOL START END"
+            description="Live Binance smoke test. Usage: python test_binance.py SYMBOL START END"
         )
         parser.add_argument("symbol", help="e.g. BTCUSDT")
         parser.add_argument("start", help="start date, e.g. 2024-01-01")
         parser.add_argument("end", help="end date, e.g. 2024-01-02")
         parser.add_argument("--interval", default="1h", help="kline interval (default 1h)")
         parser.add_argument("--limit", type=int, default=5, help="candles to fetch (default 5)")
+        parser.add_argument(
+            "--ohlcv", action="store_true", help="run fetch_ohlcv end-to-end (adapter)"
+        )
         args = parser.parse_args()
 
         live_klines(
@@ -264,6 +310,7 @@ if __name__ == "__main__":
             datetime.fromisoformat(args.end),
             interval=args.interval,
             limit=args.limit,
+            as_df=args.ohlcv,
         )
     else:
         sys.exit(pytest.main([__file__]))
