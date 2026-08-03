@@ -55,8 +55,14 @@ class BinanceREST:
         )
 
     @staticmethod
-    def _klines_weight(limit: int) -> int:
-        """Binance spot kline request weight: 2 for up to 500 candles, 5 for 1000."""
+    def _klines_weight(limit: int, market_type: str = "spot") -> int:
+        """Binance kline request weight.
+
+        Spot: 2 for up to 500 candles, 5 for up to 1000.
+        USD-M futures: a flat weight of 1 per klines request.
+        """
+        if market_type == "futures":
+            return 1
         if limit <= 500:
             return 2
         return 5
@@ -96,30 +102,40 @@ class BinanceREST:
         end: datetime | None = None,
         *,
         limit: int = 1000,
+        market_type: str = "spot",
     ) -> list:
         """Fetch raw Binance klines for ``symbol`` at ``interval``.
 
         One HTTP request for up to ``limit`` candles (Binance caps at 1000).
         ``start``/``end`` are optional; when given they are sent as
-        ``startTime``/``endTime`` (epoch milliseconds). Returns the raw
-        12-field kline rows; the mapper converts them to canonical OHLCV.
+        ``startTime``/``endTime`` (epoch milliseconds). ``market_type`` selects
+        the spot (``"spot"``) or USD-M futures (``"futures"``) klines endpoint.
+        Returns the raw 12-field kline rows; the mapper converts them to
+        canonical OHLCV. Both endpoints return the same row shape.
         """
-        self._acquire(self._klines_weight(limit))
+        self._acquire(self._klines_weight(limit, market_type))
         params: dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": limit}
         if start is not None:
             params["startTime"] = _to_millis(start)
         if end is not None:
             params["endTime"] = _to_millis(end)
         logger.info(
-            "Binance get_klines symbol=%s interval=%s start=%s end=%s limit=%s",
+            "Binance %s klines symbol=%s interval=%s start=%s end=%s limit=%s",
+            market_type,
             symbol,
             interval,
             start,
             end,
             limit,
         )
+
+        if market_type == "futures":
+            caller = self._client.futures_klines
+        else:
+            caller = self._client.get_klines
+
         try:
-            return list(self._client.get_klines(**params))
+            return list(caller(**params))
         except BinanceAPIException as exc:
             raise self._translate(exc) from exc
         except BinanceRequestException as exc:
