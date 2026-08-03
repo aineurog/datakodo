@@ -47,9 +47,7 @@ def main() -> None:
     # 3. Fetch different data: spot + USD-M futures, save each to CSV.
     for market in MARKETS:
         print(f"Fetching {market} OHLCV for {SYMBOL} {TIMEFRAME} ...")
-        df = adapter.fetch_ohlcv(
-            SYMBOL, TIMEFRAME, START, END, market_type=market, persist=False
-        )
+        df = adapter.fetch_ohlcv(SYMBOL, TIMEFRAME, START, END, market_type=market, persist=False)
         print(f"  Returned {len(df)} candles x {list(df.columns)}")
 
         path = OUT_DIR / f"ohlcv_{TIMEFRAME}_{market}.csv"

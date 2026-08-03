@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 class BinanceWS:
     """Async WebSocket client for Binance real-time streams."""
 
-    STREAM_BASE = "wss://stream.binance.com:9443/ws"
-
     def __init__(
         self, api_key: str = "", api_secret: str = "", config: Config | None = None
     ) -> None:

@@ -52,17 +52,17 @@ from datakodo.storage.parquet import ParquetBackend
 
 RAW_KLINE = [
     1704067200000,  # open_time (ms)
-    "40000.0",      # open
-    "41000.0",      # high
-    "39000.0",      # low
-    "40500.0",      # close
-    "12.5",         # volume
+    "40000.0",  # open
+    "41000.0",  # high
+    "39000.0",  # low
+    "40500.0",  # close
+    "12.5",  # volume
     1704067260000,  # close_time
-    "500000.0",     # quote volume
-    100,            # trades
-    "6.25",         # taker buy base
-    "250000.0",     # taker buy quote
-    0,              # ignore
+    "500000.0",  # quote volume
+    100,  # trades
+    "6.25",  # taker buy base
+    "250000.0",  # taker buy quote
+    0,  # ignore
 ]
 
 RAW_KLINES = [RAW_KLINE]
@@ -234,9 +234,7 @@ def test_rest_klines_routes_to_futures():
             calls["spot"] = kwargs
             return RAW_KLINES
 
-    rest._client = type(
-        "FakeClient", (), {"futures_klines": _Futures(), "get_klines": _Spot()}
-    )()
+    rest._client = type("FakeClient", (), {"futures_klines": _Futures(), "get_klines": _Spot()})()
 
     assert rest.klines("BTCUSDT", "1h", market_type="futures") == RAW_KLINES
     assert "futures" in calls

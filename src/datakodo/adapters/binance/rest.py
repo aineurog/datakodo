@@ -54,9 +54,13 @@ class BinanceREST:
                 }
             )
         self._config = cfg
-        rate, burst = rate_limit if rate_limit is not None else (
-            cfg.binance_rate_limit_rate,
-            cfg.binance_rate_limit_burst,
+        rate, burst = (
+            rate_limit
+            if rate_limit is not None
+            else (
+                cfg.binance_rate_limit_rate,
+                cfg.binance_rate_limit_burst,
+            )
         )
         self._limiter = TokenBucket(rate=rate, burst=burst)
         self._client = Client(
