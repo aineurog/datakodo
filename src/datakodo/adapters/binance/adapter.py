@@ -13,6 +13,7 @@ import pandas as pd
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
 from datakodo.adapters.binance.rest import BinanceREST
 from datakodo.adapters.binance.ws import BinanceWS
+from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
 from datakodo.core.interfaces import AdapterInterface
@@ -55,10 +56,17 @@ class BinanceAdapter(AdapterInterface):
         api_key: str = "",
         api_secret: str = "",
         storage: ParquetBackend | None = None,
+        config: Config | None = None,
     ) -> None:
-        self._rest = BinanceREST(api_key, api_secret)
-        self._ws = BinanceWS(api_key, api_secret)
-        self._storage = storage or ParquetBackend()
+        self._config = config or Config()
+        self._rest = BinanceREST(api_key, api_secret, config=self._config)
+        self._ws = BinanceWS(api_key, api_secret, config=self._config)
+        if storage is not None:
+            self._storage = storage
+        elif self._config.cache_enabled:
+            self._storage = ParquetBackend(base_dir=str(self._config.cache_dir))
+        else:
+            self._storage = ParquetBackend(base_dir="")
 
     # -- instruments --
 
@@ -94,15 +102,18 @@ class BinanceAdapter(AdapterInterface):
         timeframe: str,
         start: datetime,
         end: datetime,
-        market_type: str = "spot",
-        persist: bool = True,
+        market_type: str = "",
+        persist: bool | None = None,
     ) -> pd.DataFrame:
         """Fetch OHLCV candles for a date range, validating and persisting them.
 
-        ``market_type`` selects spot or USD-M futures klines. When ``persist``
-        is true the validated frame is written to the configured storage
+        ``market_type`` selects spot or USD-M futures klines; it defaults to the
+        value configured on the adapter. When ``persist`` is true (default comes
+        from config) the validated frame is written to the configured storage
         backend under a deterministic cache key.
         """
+        market_type = market_type or self._config.binance_market_type
+        persist = self._config.cache_enabled if persist is None else persist
         tf = Timeframe(timeframe)
         interval = BINANCE_MAP[tf]
 

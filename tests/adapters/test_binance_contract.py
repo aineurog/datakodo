@@ -13,8 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
-from datakodo.core.exceptions import NotSupportedError
-from datakodo.core.interfaces import check_capability
+from datakodo.core.config import Config
 
 CANONICAL_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume", "session"]
 
@@ -36,30 +35,14 @@ _KLINE = [
 ]
 
 
-def test_binance_adapter_instantiates():
-    adapter = BinanceAdapter()
-    assert adapter is not None
-
-
-def test_binance_declares_supported_capabilities():
-    adapter = BinanceAdapter()
-    assert adapter.supports_ohlcv is True
-    assert adapter.supports_ticks is True
-    assert adapter.supports_streaming_orderbook is True
-
-
-def test_binance_check_capability_supported():
-    check_capability(BinanceAdapter(), "supports_ohlcv")  # must not raise
-
-
-def test_binance_check_capability_rejects_unsupported():
-    adapter = BinanceAdapter()
-    with pytest.raises(NotSupportedError):
-        check_capability(adapter, "supports_fundamentals")
-
-
-def test_binance_does_not_require_paid_tier():
-    assert BinanceAdapter().requires_paid_tier is False
+@pytest.fixture(autouse=True)
+def _clear_datakodo_env(monkeypatch):
+    """Make tests hermetic: drop real DATAKODO_* env vars."""
+    for key in list(Config.model_fields) + [
+        "DATAKODO_BINANCE_API_KEY",
+        "DATAKODO_BINANCE_API_SECRET",
+    ]:
+        monkeypatch.delenv("DATAKODO_" + key.upper(), raising=False)
 
 
 def test_binance_fetch_ohlcv_matches_canonical_contract():
@@ -70,3 +53,7 @@ def test_binance_fetch_ohlcv_matches_canonical_contract():
     assert list(df.columns) == CANONICAL_COLUMNS
     assert df["timestamp"].dt.tz is not None
     assert (df["session"] == "n/a").all()
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

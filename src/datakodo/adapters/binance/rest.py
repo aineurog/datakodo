@@ -7,6 +7,7 @@ from typing import Any
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 
+from datakodo.core.config import Config
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
@@ -40,18 +41,35 @@ class BinanceREST:
         api_key: str = "",
         api_secret: str = "",
         *,
-        timeout: float = 10.0,
+        timeout: float | None = None,
         rate_limit: tuple[float, int] | None = None,
+        config: Config | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._api_secret = api_secret
-        rate, burst = rate_limit if rate_limit is not None else (100.0, 1000)
+        cfg = config or Config()
+        if api_key:
+            cfg = cfg.model_copy(
+                update={
+                    "binance_api_key": api_key,
+                    "binance_api_secret": api_secret,
+                }
+            )
+        self._config = cfg
+        rate, burst = (
+            rate_limit
+            if rate_limit is not None
+            else (
+                cfg.binance_rate_limit_rate,
+                cfg.binance_rate_limit_burst,
+            )
+        )
         self._limiter = TokenBucket(rate=rate, burst=burst)
         self._client = Client(
-            api_key,
-            api_secret,
-            requests_params={"timeout": timeout},
+            cfg.binance_api_key,
+            cfg.binance_api_secret,
+            requests_params={"timeout": timeout if timeout is not None else cfg.binance_timeout},
             ping=False,
+            tld=cfg.binance_tld,
+            testnet=cfg.binance_testnet,
         )
 
     @staticmethod
