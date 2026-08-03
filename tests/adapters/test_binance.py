@@ -7,15 +7,24 @@ All endpoints used are public, so no API keys are needed.
 Run:  python tests/adapters/test_binance.py
 """
 
+import json
 import sys
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
 from datakodo.adapters.binance.rest import BinanceREST
-from datakodo.core.exceptions import RateLimitError
+from datakodo.core.exceptions import (
+    AuthenticationError,
+    ConnectionError,
+    ProviderError,
+    RateLimitError,
+    SymbolNotFoundError,
+)
 
 SYMBOL = "BTCUSDT"
 START = datetime(2024, 1, 1, tzinfo=UTC)
@@ -82,6 +91,50 @@ def test_klines_raises_rate_limit_when_bucket_empty():
     with pytest.raises(RateLimitError) as exc:
         rest.klines(SYMBOL, INTERVAL, START, END)
     assert exc.value.retry_after > 0
+
+
+def _api_exc(code, status_code=400, msg="api message"):
+    class _Resp:
+        text = ""
+        request = None
+
+    text = json.dumps({"code": code, "msg": msg})
+    return BinanceAPIException(_Resp(), status_code, text)
+
+
+def test_invalid_symbol_maps_to_symbol_not_found():
+    rest = BinanceREST()
+    with patch.object(rest._client, "get_klines", side_effect=_api_exc(-1121)):
+        with pytest.raises(SymbolNotFoundError):
+            rest.klines(SYMBOL, INTERVAL, START, END)
+
+
+def test_rate_limit_maps_to_rate_limit_error():
+    rest = BinanceREST()
+    with patch.object(rest._client, "get_klines", side_effect=_api_exc(-1003, status_code=429)):
+        with pytest.raises(RateLimitError):
+            rest.klines(SYMBOL, INTERVAL, START, END)
+
+
+def test_auth_maps_to_authentication_error():
+    rest = BinanceREST()
+    with patch.object(rest._client, "get_klines", side_effect=_api_exc(-2015, status_code=401)):
+        with pytest.raises(AuthenticationError):
+            rest.klines(SYMBOL, INTERVAL, START, END)
+
+
+def test_network_maps_to_connection_error():
+    rest = BinanceREST()
+    with patch.object(rest._client, "get_klines", side_effect=BinanceRequestException("boom")):
+        with pytest.raises(ConnectionError):
+            rest.klines(SYMBOL, INTERVAL, START, END)
+
+
+def test_unknown_error_maps_to_provider_error():
+    rest = BinanceREST()
+    with patch.object(rest._client, "get_klines", side_effect=_api_exc(-1999)):
+        with pytest.raises(ProviderError):
+            rest.klines(SYMBOL, INTERVAL, START, END)
 
 
 if __name__ == "__main__":

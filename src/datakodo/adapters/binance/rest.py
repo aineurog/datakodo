@@ -5,8 +5,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 from binance.client import Client
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 
-from datakodo.core.exceptions import RateLimitError
+from datakodo.core.exceptions import (
+    AuthenticationError,
+    ConnectionError,
+    DataLibError,
+    ProviderError,
+    RateLimitError,
+    SymbolNotFoundError,
+)
 from datakodo.ratelimit.limiter import TokenBucket
 
 logger = logging.getLogger(__name__)
@@ -64,6 +72,24 @@ class BinanceREST:
                 retry_after=retry_after,
             )
 
+    @staticmethod
+    def _translate(exc: BinanceAPIException) -> DataLibError:
+        """Map a ``BinanceAPIException`` to the DataKodo exception hierarchy."""
+        code = exc.code or 0
+        status = exc.status_code
+        message = exc.message or exc.text
+
+        if code == -1001:  # DISCONNECTED
+            return ConnectionError(f"Binance connection lost: {message}")
+        if code == -1121:  # INVALID_SYMBOL
+            return SymbolNotFoundError(f"Binance symbol not found: {message}")
+        if code in (-1022, -2014, -2015) or status in (401, 403):  # auth
+            return AuthenticationError(f"Binance authentication failed: {message}")
+        if code == -1003 or status in (418, 429):  # too many requests
+            return RateLimitError(f"Binance rate limit: {message}")
+
+        return ProviderError(f"Binance error ({code}): {message}", original=exc)
+
     def klines(
         self,
         symbol: str,
@@ -94,4 +120,9 @@ class BinanceREST:
             end,
             limit,
         )
-        return list(self._client.get_klines(**params))
+        try:
+            return list(self._client.get_klines(**params))
+        except BinanceAPIException as exc:
+            raise self._translate(exc) from exc
+        except BinanceRequestException as exc:
+            raise ConnectionError(f"Binance request failed: {exc}") from exc
