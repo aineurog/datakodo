@@ -45,7 +45,11 @@ class BinanceWS:
                 while True:
                     message = await stream.recv()
                     # Futures multiplex sockets wrap the payload under a "data" key.
-                    yield message["data"] if isinstance(message, dict) and "data" in message else message
+                    yield (
+                        message["data"]
+                        if isinstance(message, dict) and "data" in message
+                        else message
+                    )
         finally:
             await client.close_connection()
 

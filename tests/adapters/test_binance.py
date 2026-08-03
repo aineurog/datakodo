@@ -66,11 +66,11 @@ def main() -> None:
         raw = rest.klines(SYMBOL, INTERVAL, START, END, market_type=market)
         _print_len(raw)
 
-    print(f"Calling rest.klines(symbol, interval, start, end, limit=5, market_type='spot')")
+    print("Calling rest.klines(symbol, interval, start, end, limit=5, market_type='spot')")
     raw_spot_5 = rest.klines(SYMBOL, INTERVAL, START, END, limit=5, market_type="spot")
     _print_len(raw_spot_5)
 
-    print(f"Calling rest.klines(symbol, interval, start, end, limit=5, market_type='futures')")
+    print("Calling rest.klines(symbol, interval, start, end, limit=5, market_type='futures')")
     raw_fut_5 = rest.klines(SYMBOL, INTERVAL, START, END, limit=5, market_type="futures")
     _print_len(raw_fut_5)
 

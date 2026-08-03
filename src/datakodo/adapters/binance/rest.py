@@ -81,7 +81,7 @@ class BinanceREST:
         """Map a ``BinanceAPIException`` to the DataKodo exception hierarchy."""
         code = exc.code or 0
         status = exc.status_code
-        message = exc.message or exc.text
+        message = exc.message or exc.response.text
 
         if code == -1001:  # DISCONNECTED
             return ConnectionError(f"Binance connection lost: {message}")
