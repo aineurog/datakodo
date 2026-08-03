@@ -10,18 +10,36 @@ from collections.abc import AsyncIterator
 
 from binance import AsyncClient, BinanceSocketManager
 
+from datakodo.core.config import Config
+
 logger = logging.getLogger(__name__)
 
 
 class BinanceWS:
     """Async WebSocket client for Binance real-time streams."""
 
-    def __init__(self, api_key: str = "", api_secret: str = "") -> None:
-        self._api_key = api_key
-        self._api_secret = api_secret
+    STREAM_BASE = "wss://stream.binance.com:9443/ws"
+
+    def __init__(
+        self, api_key: str = "", api_secret: str = "", config: Config | None = None
+    ) -> None:
+        cfg = config or Config()
+        if api_key:
+            cfg = cfg.model_copy(
+                update={
+                    "binance_api_key": api_key,
+                    "binance_api_secret": api_secret,
+                }
+            )
+        self._config = cfg
 
     async def _client(self) -> AsyncClient:
-        return await AsyncClient.create(self._api_key, self._api_secret)
+        return await AsyncClient.create(
+            self._config.binance_api_key,
+            self._config.binance_api_secret,
+            tld=self._config.binance_tld,
+            testnet=self._config.binance_testnet,
+        )
 
     async def _messages(self, symbol: str, market_type: str, depth: bool) -> AsyncIterator:
         """Open the relevant socket and yield its decoded messages."""

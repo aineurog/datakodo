@@ -124,17 +124,24 @@ def main() -> None:
         print(msg)
         fetched = adapter.fetch_ohlcv(SYMBOL, INTERVAL, START, END, market_type=market)
         print(f"Returned: {len(fetched)} candles x {list(fetched.columns)}")
+        _save_csv(fetched, f"ohlcv_{INTERVAL}_{market}")
 
     print("Calling fetch_ohlcv(daily, market_type='spot')")
     daily = adapter.fetch_ohlcv(SYMBOL, D1, START, END, market_type="spot")
     print(f"Returned: {len(daily)} daily candles")
+    _save_csv(daily, f"ohlcv_{D1}_spot")
 
     print("Calling fetch_ohlcv(large range, 1h, market='spot', persist=False)")
     big = adapter.fetch_ohlcv(
-        SYMBOL, INTERVAL, START, datetime(2026, 8, 1, tzinfo=UTC), persist=False
+        SYMBOL,
+        INTERVAL,
+        datetime(2026, 7, 1, tzinfo=UTC),
+        datetime(2026, 8, 3, tzinfo=UTC),
+        persist=False,
     )
     summary = f"min={big['timestamp'].min()}, max={big['timestamp'].max()}"
     print(f"Returned: {len(big)} paginated candles ({summary})")
+    _save_csv(big, "ohlcv_1h_spot_paginated")
 
     # 7. WebSocket streams (live, both markets, stop after a couple)
     asyncio.run(_streams())
