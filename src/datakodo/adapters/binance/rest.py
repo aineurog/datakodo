@@ -56,9 +56,7 @@ class BinanceREST:
 
     @staticmethod
     def _klines_weight(limit: int) -> int:
-        """Binance spot kline request weight for a given ``limit``."""
-        if limit <= 100:
-            return 1
+        """Binance spot kline request weight: 2 for up to 500 candles, 5 for 1000."""
         if limit <= 500:
             return 2
         return 5

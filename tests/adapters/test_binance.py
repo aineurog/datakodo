@@ -81,8 +81,9 @@ def test_fetch_ohlcv_paginates_large_range():
 
 
 def test_klines_weight_by_limit():
-    assert BinanceREST._klines_weight(100) == 1
-    assert BinanceREST._klines_weight(200) == 2
+    # Current Binance spot weight: 2 for up to 500 candles, 5 for up to 1000.
+    assert BinanceREST._klines_weight(100) == 2
+    assert BinanceREST._klines_weight(500) == 2
     assert BinanceREST._klines_weight(1000) == 5
 
 
