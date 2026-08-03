@@ -15,6 +15,7 @@ import pytest
 from datakodo.adapters.binance.adapter import BinanceAdapter
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
 from datakodo.adapters.binance.rest import BinanceREST
+from datakodo.core.exceptions import RateLimitError
 
 SYMBOL = "BTCUSDT"
 START = datetime(2024, 1, 1, tzinfo=UTC)
@@ -68,6 +69,19 @@ def test_fetch_ohlcv_paginates_large_range():
     # stitched chunks are continuous — no gaps, no duplicates
     gaps = df["timestamp"].diff().dropna().dt.total_seconds()
     assert (gaps == 3600).all()
+
+
+def test_klines_weight_by_limit():
+    assert BinanceREST._klines_weight(100) == 1
+    assert BinanceREST._klines_weight(200) == 2
+    assert BinanceREST._klines_weight(1000) == 5
+
+
+def test_klines_raises_rate_limit_when_bucket_empty():
+    rest = BinanceREST(rate_limit=(10.0, 0))  # no tokens available
+    with pytest.raises(RateLimitError) as exc:
+        rest.klines(SYMBOL, INTERVAL, START, END)
+    assert exc.value.retry_after > 0
 
 
 if __name__ == "__main__":
