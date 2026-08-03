@@ -8,7 +8,10 @@ import pandas as pd
 from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
 from datakodo.adapters.binance.rest import BinanceREST
 from datakodo.adapters.binance.ws import BinanceWS
+from datakodo.core.enums import Timeframe
 from datakodo.core.interfaces import AdapterInterface
+from datakodo.core.timeframe import BINANCE_MAP
+from datakodo.ops.pagination import paginate
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +37,14 @@ class BinanceAdapter(AdapterInterface):
     def fetch_ohlcv(
         self, symbol: str, timeframe: str, start: datetime, end: datetime
     ) -> pd.DataFrame:
-        raw = self._rest.klines(symbol, timeframe, start, end)
-        return map_ohlcv(raw)
+        tf = Timeframe(timeframe)
+        interval = BINANCE_MAP[tf]
+
+        def _fetch_chunk(symbol: str, chunk_start: datetime, chunk_end: datetime) -> pd.DataFrame:
+            raw = self._rest.klines(symbol, interval, chunk_start, chunk_end)
+            return map_ohlcv(raw)
+
+        return paginate(_fetch_chunk, symbol, tf, start, end)
 
     # -- streaming (async) --
 
