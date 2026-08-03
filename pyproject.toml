@@ -95,6 +95,7 @@ warn_return_any = true
 module = [
     "MetaTrader5",
     "ib_insync.*",
+    "binance.*",
     "python_binance.*",
     "alpaca.*",
     "polygon.*",
