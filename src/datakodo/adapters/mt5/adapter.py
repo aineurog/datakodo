@@ -30,9 +30,9 @@ class MT5Adapter(AdapterInterface):
     def __init__(self, terminal_path: str = "") -> None:
         self._terminal = MT5Terminal(terminal_path)
 
-    def connect(self) -> bool:
+    def connect(self) -> None:
         """Initialize the MT5 terminal connection."""
-        return self._terminal.initialize()
+        self._terminal.initialize()
 
     def disconnect(self) -> None:
         """Shut down the MT5 terminal connection."""
