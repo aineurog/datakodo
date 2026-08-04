@@ -97,6 +97,7 @@ class BinanceAdapter(AdapterInterface):
         if market_type == "futures":
             return Instrument(
                 symbol=symbol,
+                provider_symbol=symbol,
                 asset_class=AssetClass.CRYPTO,
                 instrument_type=InstrumentType.PERPETUAL,
                 exchange="Binance",
@@ -105,6 +106,7 @@ class BinanceAdapter(AdapterInterface):
             )
         return Instrument(
             symbol=symbol,
+            provider_symbol=symbol,
             asset_class=AssetClass.CRYPTO,
             instrument_type=InstrumentType.SPOT,
             exchange="Binance",
@@ -123,6 +125,7 @@ class BinanceAdapter(AdapterInterface):
         persist: bool | None = None,
         include_live: bool = False,
         output_format: str | None = None,
+        force_refresh: bool = False,
     ) -> Any:
         """Fetch OHLCV candles for a date range, validating and persisting them.
 
@@ -142,10 +145,25 @@ class BinanceAdapter(AdapterInterface):
         ``output_format`` selects the user-facing representation (design doc
         sec 12): pandas (default), polars, arrow, or numpy — per-call override
         of ``Config.output_format``.
+
+        ``force_refresh`` bypasses the cache read path and always hits the
+        provider's API (design doc sec 17). The result is still persisted when
+        ``persist`` is true.
         """
         market_type = market_type or self._config.binance_market_type
         persist = self._config.cache_enabled if persist is None else persist
+        key = build_cache_key(
+            f"binance-{market_type}", symbol, timeframe, (start.isoformat(), end.isoformat())
+        )
         tf = Timeframe(timeframe)
+
+        # Cache hit: return persisted data without touching the provider
+        # (design doc sec 17 — avoid re-fetching immutable historical data).
+        if persist and not force_refresh and not include_live and tf in self.native_timeframes:
+            cached = self._try_cache_read(key)
+            if cached is not None:
+                logger.info("Cache hit for %s (%d rows)", key, len(cached))
+                return to_output_format(cached, output_format or self._config.output_format)
 
         if tf in self.native_timeframes:
             df = self._fetch_ohlcv_native(symbol, timeframe, start, end, market_type, include_live)
@@ -169,12 +187,20 @@ class BinanceAdapter(AdapterInterface):
         if persist:
             # Only closed/final data is ever cached (design doc sec 17).
             closed = df if not include_live else drop_incomplete_bars(df, timeframe)
-            key = build_cache_key(
-                f"binance-{market_type}", symbol, timeframe, (start.isoformat(), end.isoformat())
-            )
             self._storage.write(key, closed)
             logger.info("Persisted OHLCV to cache key %s", key)
         return to_output_format(df, output_format or self._config.output_format)
+
+    def _try_cache_read(self, key: str) -> pd.DataFrame | None:
+        """Return cached OHLCV data for *key* if it exists, else None."""
+        try:
+            if self._storage.exists(key):
+                df = pd.DataFrame(self._storage.read(key))
+                if not df.empty and "timestamp" in df.columns:
+                    return df
+        except (KeyError, TypeError):
+            pass
+        return None
 
     def _fetch_ohlcv_native(
         self,

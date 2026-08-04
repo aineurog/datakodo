@@ -178,14 +178,55 @@ class BinanceREST:
         return ProviderError(f"Binance error ({code}): {message}", original=exc)
 
     def _call(self, caller: Any, weight: int, **params: Any) -> Any:
-        """Run *caller* with rate limiting and exception mapping."""
-        self._acquire(weight)
-        try:
-            return caller(**params)
-        except BinanceAPIException as exc:
-            raise self._translate(exc) from exc
-        except BinanceRequestException as exc:
-            raise ConnectionError(f"Binance request failed: {exc}") from exc
+        """Run *caller* with rate limiting, retry, and exception mapping.
+
+        Retries on ``RateLimitError`` (HTTP 429 / code -1003) with exponential
+        backoff governed by ``Config.max_retries`` and ``Config.retry_base_delay``
+        (design doc sec 16).
+        """
+        import time as _time
+
+        last_exc: Exception | None = None
+        max_retries = self._config.max_retries
+        base_delay = self._config.retry_base_delay
+
+        for attempt in range(max_retries + 1):
+            self._acquire(weight)
+            try:
+                return caller(**params)
+            except BinanceAPIException as exc:
+                translated = self._translate(exc)
+                # Rate limits: back off and retry.
+                if isinstance(translated, RateLimitError) and attempt < max_retries:
+                    delay = base_delay * (2**attempt)
+                    retry_after = max(delay, translated.retry_after)
+                    logger.info(
+                        "Binance rate-limited (attempt %d/%d), retrying in %.1fs",
+                        attempt + 1,
+                        max_retries + 1,
+                        retry_after,
+                    )
+                    _time.sleep(retry_after)
+                    last_exc = translated
+                    continue
+                raise translated from exc
+            except BinanceRequestException as exc:
+                translated = ConnectionError(f"Binance request failed: {exc}")
+                # Connection errors are retryable.
+                if attempt < max_retries:
+                    delay = base_delay * (2**attempt)
+                    logger.info(
+                        "Binance connection failed (attempt %d/%d), retrying in %.1fs",
+                        attempt + 1,
+                        max_retries + 1,
+                        delay,
+                    )
+                    _time.sleep(delay)
+                    last_exc = translated
+                    continue
+                raise translated from exc
+
+        raise last_exc  # type: ignore[misc]  # unreachable per loop, safe guard
 
     def _market_caller(self, name: str, market_type: str) -> Any:
         """Pick the spot vs futures client method for ``name``.

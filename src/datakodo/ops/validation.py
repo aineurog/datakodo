@@ -59,3 +59,37 @@ def validate_ohlcv(df: pd.DataFrame) -> None:
     # No duplicate timestamps.
     if df["timestamp"].duplicated().any():
         raise ValueError("Duplicate timestamps found.")
+
+
+def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Return rows where the interval to the next bar exceeds one candle.
+
+    Expects a sorted, deduplicated OHLCV DataFrame. For each row, computes
+    the difference to the next row's timestamp; if that gap is larger than
+    one candle of ``timeframe``, the row is flagged as a gap boundary.
+
+    Returns:
+        A DataFrame of rows that precede a gap, with an extra ``gap_missing``
+        column (number of missing candles between the current and next row).
+        Empty if no gaps are found.
+
+    Design doc sec 18: gap detection catches provider-side bugs such as
+    missing candles, exchange downtime, or data feed interruption.
+    """
+    if df.empty or "timestamp" not in df.columns or len(df) < 2:
+        return df.iloc[:0].assign(gap_missing=0)
+
+    delta = timeframe_delta(timeframe)
+    # Interval from each row's timestamp to the next row's timestamp.
+    ts = df["timestamp"]
+    intervals = ts.shift(-1) - ts
+    # A gap exists when that interval is larger than one candle.
+    gap_mask = intervals > pd.Timedelta(delta)
+    gap_mask.iloc[-1] = False  # last row has no "next row"
+    result = df.loc[gap_mask].copy()
+    if result.empty:
+        return result.assign(gap_missing=0)
+    # Number of missing candles = (gap_duration / candle_duration) - 1.
+    gap_candles = ((intervals[gap_mask] / pd.Timedelta(delta)).round().astype(int) - 1).values
+    result["gap_missing"] = gap_candles
+    return result
