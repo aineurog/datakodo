@@ -174,12 +174,18 @@ def test_to_millis_naive_assumed_utc():
 
 
 def test_klines_weight_spot():
+    # Spot klines weight is flat 2 (official Binance docs, 2026).
     assert BinanceREST._klines_weight(100, "spot") == 2
-    assert BinanceREST._klines_weight(600, "spot") == 5
+    assert BinanceREST._klines_weight(600, "spot") == 2
+    assert BinanceREST._klines_weight(1000, "spot") == 2
 
 
-def test_klines_weight_futures_flat():
-    assert BinanceREST._klines_weight(1000, "futures") == 1
+def test_klines_weight_futures():
+    # USD-M futures klines: 1 for [1,100), 2 for [100,500), 5 for [500,1000], 10 above.
+    assert BinanceREST._klines_weight(50, "futures") == 1
+    assert BinanceREST._klines_weight(100, "futures") == 2
+    assert BinanceREST._klines_weight(500, "futures") == 5
+    assert BinanceREST._klines_weight(1000, "futures") == 10
 
 
 def _make_api_exc(code: int, status: int, message: str):

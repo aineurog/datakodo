@@ -33,6 +33,24 @@ class AdapterInterface(ABC):
     def fetch_ohlcv(self, symbol: str, timeframe: str, start: Any, end: Any) -> Any:
         """Fetch OHLCV candles for a date range. Always sync/blocking."""
 
+    def fetch_ticks(self, symbol: str, start: Any = None, end: Any = None, **kwargs: Any) -> Any:
+        """Fetch historical trade ticks for a date range. Always sync.
+
+        Adapt data to the canonical Trade schema (price, size, side,
+        timestamp). Default implementation raises so an adapter that
+        declares ``supports_ticks`` must override it — unsupported
+        capabilities fail clearly per design doc sec 2.
+        """
+        raise NotSupportedError("fetch_ticks is not supported by this adapter")
+
+    def fetch_orderbook_snapshot(self, symbol: str, **kwargs: Any) -> Any:
+        """Fetch a single order book snapshot. Always sync.
+
+        Adaptations return canonical ``OrderBook`` data. Default raises so
+        an adapter declaring ``supports_orderbook_snapshot`` must override it.
+        """
+        raise NotSupportedError("fetch_orderbook_snapshot is not supported by this adapter")
+
     # --- streaming (async) ---
 
     async def stream_trades(self, symbol: str) -> Any:
