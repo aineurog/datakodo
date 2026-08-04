@@ -661,9 +661,9 @@ def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
         persist=False,
     )
     assert len(df) == 1
-    assert df.loc[0, "open"] == 100.0   # first source open
-    assert df.loc[0, "high"] == 140.0   # max high
-    assert df.loc[0, "low"] == 90.0     # min low
+    assert df.loc[0, "open"] == 100.0  # first source open
+    assert df.loc[0, "high"] == 140.0  # max high
+    assert df.loc[0, "low"] == 90.0  # min low
     assert df.loc[0, "close"] == 135.0  # last source close
     assert df.loc[0, "volume"] == 1000.0
 

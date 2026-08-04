@@ -92,10 +92,8 @@ def map_fundamentals(ticker: dict, info: dict | None = None) -> Fundamentals:
         if close_ms is not None
         else None,
         crypto=CryptoFundamentals(
-            base_asset=info.get("baseAsset", "")
-            or _base_asset(ticker.get("symbol", "")),
-            quote_asset=info.get("quoteAsset", "")
-            or _quote_asset(ticker.get("symbol", "")),
+            base_asset=info.get("baseAsset", "") or _base_asset(ticker.get("symbol", "")),
+            quote_asset=info.get("quoteAsset", "") or _quote_asset(ticker.get("symbol", "")),
             status=info.get("status", "TRADING"),  # TRADING / BREAK / HALT
             is_spot_trading_allowed=info.get("isSpotTradingAllowed"),
             is_margin_trading_allowed=info.get("isMarginTradingAllowed"),

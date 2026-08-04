@@ -23,9 +23,7 @@ _TIMEFRAME_MINUTES: dict[Timeframe, int] = {
 }
 
 
-def pick_source_timeframe(
-    target: Timeframe, native: Sequence[Timeframe]
-) -> Timeframe:
+def pick_source_timeframe(target: Timeframe, native: Sequence[Timeframe]) -> Timeframe:
     """Return the largest native timeframe strictly smaller than ``target``.
 
     This is the finest source DataKodo can fetch to resample up to ``target``

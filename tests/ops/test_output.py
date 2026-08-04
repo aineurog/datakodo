@@ -11,9 +11,7 @@ def ohlcv_df() -> pd.DataFrame:
     """A tiny canonical OHLCV frame."""
     return pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2024-01-01 00:00:00", "2024-01-01 01:00:00"], utc=True
-            ),
+            "timestamp": pd.to_datetime(["2024-01-01 00:00:00", "2024-01-01 01:00:00"], utc=True),
             "open": [100.0, 101.0],
             "high": [110.0, 111.0],
             "low": [90.0, 91.0],

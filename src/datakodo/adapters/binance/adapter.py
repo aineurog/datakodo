@@ -159,7 +159,11 @@ class BinanceAdapter(AdapterInterface):
             validate_ohlcv(df)
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s %s",
-                source_tf.value, timeframe, len(df), market_type, symbol,
+                source_tf.value,
+                timeframe,
+                len(df),
+                market_type,
+                symbol,
             )
 
         if persist:
@@ -218,7 +222,9 @@ class BinanceAdapter(AdapterInterface):
         if self._config.flag_resample:
             logger.warning(
                 "%s has no native %s klines; fetching %s and resampling",
-                self.__class__.__name__, requested, source,
+                self.__class__.__name__,
+                requested,
+                source,
             )
         else:
             logger.info("Deriving %s from %s by resampling", requested, source)

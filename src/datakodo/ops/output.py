@@ -46,6 +46,5 @@ def to_output_format(df: pd.DataFrame, output_format: str = "pandas") -> Any:
         return df.to_numpy()
 
     raise ValueError(
-        f"Unsupported output format {output_format!r}. "
-        f"Choose from {SUPPORTED_OUTPUT_FORMATS}."
+        f"Unsupported output format {output_format!r}. Choose from {SUPPORTED_OUTPUT_FORMATS}."
     )

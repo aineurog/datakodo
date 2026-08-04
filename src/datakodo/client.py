@@ -23,9 +23,7 @@ class Client:
         self._provider = provider
         cls = _REGISTRY.get(provider)
         if cls is None:
-            raise ValueError(
-                f"Unknown provider {provider!r}. Available: {sorted(_REGISTRY)}."
-            )
+            raise ValueError(f"Unknown provider {provider!r}. Available: {sorted(_REGISTRY)}.")
         self._adapter = cls(config=config, **kwargs)
 
     @property
