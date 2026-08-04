@@ -4,6 +4,8 @@ One implementation serves all providers. Only upsampling (1m → 1h)
 is valid; downsampling is rejected.
 """
 
+from collections.abc import Sequence
+
 import pandas as pd
 
 from datakodo.core.enums import Timeframe
@@ -19,6 +21,28 @@ _TIMEFRAME_MINUTES: dict[Timeframe, int] = {
     Timeframe.W1: 10080,
     Timeframe.MN1: 43200,
 }
+
+
+def pick_source_timeframe(
+    target: Timeframe, native: Sequence[Timeframe]
+) -> Timeframe:
+    """Return the largest native timeframe strictly smaller than ``target``.
+
+    This is the finest source DataKodo can fetch to resample up to ``target``
+    when the provider does not offer ``target`` natively (design doc sec 7).
+
+    Raises:
+        ValueError: If no native timeframe is smaller than ``target`` —
+            deriving it would require downsampling, which is not supported.
+    """
+    target_minutes = _TIMEFRAME_MINUTES[target]
+    smaller = [tf for tf in native if _TIMEFRAME_MINUTES[tf] < target_minutes]
+    if not smaller:
+        raise ValueError(
+            f"Cannot derive {target.value} by resampling: the provider has no "
+            f"native timeframe smaller than it."
+        )
+    return max(smaller, key=lambda tf: _TIMEFRAME_MINUTES[tf])
 
 
 def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:

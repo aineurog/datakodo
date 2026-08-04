@@ -29,7 +29,11 @@ import pandas as pd
 import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
-from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
+from datakodo.adapters.binance.mapper import (
+    map_fundamentals,
+    map_ohlcv,
+    map_trades,
+)
 from datakodo.adapters.binance.rest import BinanceREST, _to_millis
 from datakodo.adapters.binance.ws import BinanceWS
 from datakodo.core.config import Config
@@ -44,6 +48,7 @@ from datakodo.core.exceptions import (
 )
 from datakodo.core.interfaces import check_capability
 from datakodo.ops.pagination import paginate
+from datakodo.ops.resample import pick_source_timeframe
 from datakodo.ops.validation import validate_ohlcv
 from datakodo.storage.cache import build_cache_key, compute_expiry, is_bar_closed
 from datakodo.storage.parquet import ParquetBackend
@@ -158,6 +163,51 @@ def test_map_trades_buy():
 def test_map_trades_sell_default():
     trade = map_trades({"T": 1704067200000, "p": "50001.0", "q": "0.2", "m": False})
     assert trade.side == "sell"
+
+
+def test_map_fundamentals_ticker_and_info():
+    ticker = {
+        "symbol": "BTCUSDT",
+        "lastPrice": "63758.0",
+        "priceChange": "123.0",
+        "openPrice": "63000.0",
+        "highPrice": "64000.0",
+        "lowPrice": "62000.0",
+        "volume": "1234.5",
+        "quoteVolume": "77000000.0",
+        "closeTime": 1704067200000,
+    }
+    info = {
+        "symbol": "BTCUSDT",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "status": "TRADING",
+        "isSpotTradingAllowed": True,
+        "isMarginTradingAllowed": True,
+        "permissions": ["SPOT", "MARGIN"],
+    }
+    f = map_fundamentals(ticker, info)
+    assert f.symbol == "BTCUSDT"
+    assert f.latest_price == 63758.0
+    assert f.volume_24h == 1234.5
+    assert f.high_24h == 64000.0
+    assert f.currency == "USDT"
+    assert f.exchange == "Binance"
+    assert f.timestamp is not None
+    assert f.crypto is not None
+    assert f.crypto.base_asset == "BTC"
+    assert f.crypto.status == "TRADING"
+    assert f.crypto.permissions == ["SPOT", "MARGIN"]
+
+
+def test_map_fundamentals_falls_back_to_symbol_parsing():
+    ticker = {"symbol": "ETHUSDT", "lastPrice": "3000.0"}
+    f = map_fundamentals(ticker)  # no info block
+    assert f.currency == "USDT"
+    assert f.crypto.base_asset == "ETH"
+    assert f.crypto.quote_asset == "USDT"
+    assert f.crypto.permissions == ["SPOT"]
+    assert f.crypto.status == "TRADING"
 
 
 # --- 3. REST helpers ----------------------------------------------------------
@@ -350,7 +400,7 @@ def test_adapter_capabilities():
 
 def test_adapter_check_capability_rejects_unsupported():
     with pytest.raises(NotSupportedError):
-        check_capability(BinanceAdapter(), "supports_fundamentals")
+        check_capability(BinanceAdapter(), "supports_symbol_search")
 
 
 def test_adapter_fetch_ohlcv_mocked(monkeypatch, tmp_path):
@@ -367,6 +417,303 @@ def test_adapter_fetch_ohlcv_mocked(monkeypatch, tmp_path):
     assert len(df) == 3
     assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume", "session"]
     assert df["timestamp"].is_monotonic_increasing
+
+
+def test_fetch_ohlcv_output_format_polars(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    out = adapter.fetch_ohlcv(
+        "BTCUSDT",
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        market_type="spot",
+        output_format="polars",
+    )
+    assert type(out).__name__ == "DataFrame"  # polars.DataFrame
+    assert out.height == 2
+
+
+def test_fetch_ohlcv_output_format_arrow(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    out = adapter.fetch_ohlcv(
+        "BTCUSDT",
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        market_type="spot",
+        output_format="arrow",
+    )
+    assert type(out).__name__ == "Table"  # pyarrow.Table
+    assert out.num_rows == 2
+
+
+def test_fetch_ohlcv_batch_returns_mapping(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    result = adapter.fetch_ohlcv_batch(
+        ["BTCUSDT", "ETHUSDT"],
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        market_type="spot",
+        persist=False,
+    )
+    assert set(result) == {"BTCUSDT", "ETHUSDT"}
+    for df in result.values():
+        assert len(df) == 2
+        assert list(df.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "session",
+        ]
+
+
+def test_fetch_ohlcv_batch_combine(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    combined = adapter.fetch_ohlcv_batch(
+        ["BTCUSDT", "ETHUSDT"],
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        combine=True,
+        market_type="spot",
+        persist=False,
+    )
+    assert len(combined) == 4
+    assert "symbol" in combined.columns
+    assert combined["symbol"].tolist() == ["BTCUSDT", "BTCUSDT", "ETHUSDT", "ETHUSDT"]
+
+
+def test_fetch_ohlcv_batch_empty_symbols_raises():
+    adapter = BinanceAdapter()
+    with pytest.raises(ValueError, match="At least one symbol"):
+        adapter.fetch_ohlcv_batch(
+            [], "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+        )
+
+
+def test_fetch_ohlcv_batch_output_format(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    result = adapter.fetch_ohlcv_batch(
+        ["BTCUSDT", "ETHUSDT"],
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        output_format="polars",
+        market_type="spot",
+        persist=False,
+    )
+    for frame in result.values():
+        assert type(frame).__name__ == "DataFrame"  # polars.DataFrame
+        assert frame.height == 2
+
+
+def test_fetch_ohlcv_batch_respects_max_workers(monkeypatch, tmp_path):
+    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(1))
+    result = adapter.fetch_ohlcv_batch(
+        ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+        max_workers=2,
+        market_type="spot",
+        persist=False,
+    )
+    assert set(result) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+
+
+# --- 5c. Fundamentals ---------------------------------------------------------------
+
+
+def _fake_ticker(symbol="BTCUSDT"):
+    return {
+        "symbol": symbol,
+        "lastPrice": "63758.0",
+        "priceChange": "123.0",
+        "openPrice": "63000.0",
+        "highPrice": "64000.0",
+        "lowPrice": "62000.0",
+        "volume": "1234.5",
+        "quoteVolume": "77000000.0",
+        "closeTime": 1704067200000,
+    }
+
+
+def _fake_info(symbol="BTCUSDT"):
+    return {
+        "symbol": symbol,
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "status": "TRADING",
+        "isSpotTradingAllowed": True,
+        "isMarginTradingAllowed": True,
+        "permissions": ["SPOT"],
+    }
+
+
+def test_adapter_fetch_fundamentals_mocked(monkeypatch):
+    adapter = BinanceAdapter()
+    monkeypatch.setattr(adapter._rest, "ticker_24h", lambda *a, **k: _fake_ticker())
+    monkeypatch.setattr(adapter._rest, "exchange_info", lambda *a, **k: _fake_info())
+
+    f = adapter.fetch_fundamentals("BTCUSDT", market_type="spot")
+    assert f.symbol == "BTCUSDT"
+    assert f.latest_price == 63758.0
+    assert f.crypto.status == "TRADING"
+
+
+def test_adapter_supports_fundamentals():
+    adapter = BinanceAdapter()
+    assert adapter.supports_fundamentals is True
+    check_capability(adapter, "supports_fundamentals")  # must not raise
+
+
+# --- 5d. Client facade ---------------------------------------------------------------
+
+
+def test_client_binance_dispatch(monkeypatch, tmp_path):
+    from datakodo import Client
+
+    client = Client("binance", config=Config(cache_enabled=False))
+    assert repr(client).startswith("Client(provider=")
+    assert client.adapter is not None
+
+    monkeypatch.setattr(client.adapter._rest, "klines", lambda *a, **k: _make_klines(2))
+    df = client.fetch_ohlcv(
+        "BTCUSDT", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+    )
+    assert len(df) == 2
+
+
+def test_client_unknown_provider_raises():
+    from datakodo import Client
+
+    with pytest.raises(ValueError, match="Unknown provider"):
+        Client("alpaca")  # not registered yet
+
+
+# --- 5b. Resampling ---------------------------------------------------------------
+
+
+def _resample_kline(
+    open_ms: int, open_p: str, high_p: str, low_p: str, close_p: str, volume: str
+) -> list:
+    """Raw Binance kline row (12 fields) with prices/volume as strings."""
+    return [
+        open_ms,
+        open_p,
+        high_p,
+        low_p,
+        close_p,
+        volume,
+        open_ms + 3_599_999,
+        volume,
+        100,
+        "0",
+        "0",
+        "0",
+    ]
+
+
+class _Restricted(BinanceAdapter):
+    """Binance adapter pretending to offer only 1m and 1h natively."""
+
+    native_timeframes = (Timeframe.M1, Timeframe.H1)
+
+
+def test_pick_source_timeframe_returns_largest_smaller():
+    native = (Timeframe.M1, Timeframe.H1, Timeframe.D1)
+    assert pick_source_timeframe(Timeframe.H4, native) == Timeframe.H1
+    assert pick_source_timeframe(Timeframe.H4, native) != Timeframe.D1
+
+
+def test_pick_source_timeframe_requires_smaller_source():
+    with pytest.raises(ValueError, match="no native timeframe"):
+        pick_source_timeframe(Timeframe.M1, (Timeframe.H1,))
+
+
+def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
+    """4h requested, only 1h native -> fetch 1h and resample to one 4h bar."""
+    adapter = _Restricted()
+    raw = [
+        _resample_kline(1704067200000, "100", "110", "90", "105", "100"),  # 00:00
+        _resample_kline(1704070800000, "105", "120", "100", "115", "200"),  # 01:00
+        _resample_kline(1704074400000, "115", "130", "110", "125", "300"),  # 02:00
+        _resample_kline(1704078000000, "125", "140", "120", "135", "400"),  # 03:00
+    ]
+    monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: raw)
+
+    df = adapter.fetch_ohlcv(
+        "BTCUSDT",
+        "4h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 4, tzinfo=UTC),
+        market_type="spot",
+        persist=False,
+    )
+    assert len(df) == 1
+    assert df.loc[0, "open"] == 100.0   # first source open
+    assert df.loc[0, "high"] == 140.0   # max high
+    assert df.loc[0, "low"] == 90.0     # min low
+    assert df.loc[0, "close"] == 135.0  # last source close
+    assert df.loc[0, "volume"] == 1000.0
+
+
+def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
+    """A natively offered timeframe is fetched directly, no resampling."""
+    adapter = _Restricted()
+    captured: dict[str, str] = {}
+
+    def _fake(
+        symbol: str, interval: str, start: object, end: object, market_type: str = "spot"
+    ) -> list:
+        captured["interval"] = interval
+        return [_resample_kline(1704067200000, "100", "110", "90", "105", "100")]
+
+    monkeypatch.setattr(adapter._rest, "klines", _fake)
+    df = adapter.fetch_ohlcv(
+        "BTCUSDT",
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 2, tzinfo=UTC),
+        market_type="spot",
+        persist=False,
+    )
+    assert captured["interval"] == "1h"
+    assert len(df) == 1
+
+
+def test_fetch_ohlcv_no_native_source_raises():
+    """1m cannot be derived from a native set starting at 1h (downsampling)."""
+
+    class _NoSmall(_Restricted):
+        native_timeframes = (Timeframe.H1,)
+
+    adapter = _NoSmall()
+    with pytest.raises(ValueError, match="no native timeframe"):
+        adapter.fetch_ohlcv(
+            "BTCUSDT",
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 1, 30, tzinfo=UTC),
+            market_type="spot",
+            persist=False,
+        )
+
+
+def test_fetch_ohlcv_binance_native_includes_all_timeframes():
+    """Real Binance adapter: every canonical timeframe is native."""
+    adapter = BinanceAdapter()
+    assert tuple(Timeframe) == adapter.native_timeframes
 
 
 # --- 6. Pagination ---------------------------------------------------------------

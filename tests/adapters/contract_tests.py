@@ -94,3 +94,38 @@ class TestAdapterInterfaceContract:
 
         with pytest.raises(NotSupportedError):
             asyncio.run(_run())
+
+    def test_fetch_fundamentals_default_raises(self):
+        """Default fetch_fundamentals must raise NotSupportedError."""
+        adapter = _make_minimal_adapter()
+        with pytest.raises(NotSupportedError):
+            adapter.fetch_fundamentals("BTCUSDT")
+
+    def test_context_manager_calls_lifecycle(self):
+        """with adapter: must call connect()/disconnect()."""
+
+        calls: list[str] = []
+
+        class TrackingAdapter(AdapterInterface):
+            supports_ohlcv = True
+
+            def fetch_ohlcv(self, symbol, timeframe, start, end):
+                return pd.DataFrame()
+
+            def connect(self):
+                calls.append("connect")
+
+            def disconnect(self):
+                calls.append("disconnect")
+
+        with TrackingAdapter():
+            pass
+
+        assert calls == ["connect", "disconnect"]
+
+    def test_default_lifecycle_is_noop(self):
+        """Default connect/disconnect must not raise on plain adapters."""
+        adapter = _make_minimal_adapter()
+        adapter.connect()
+        adapter.disconnect()
+        adapter.close()

@@ -356,3 +356,38 @@ class BinanceREST:
                 **params,
             )
         )
+
+    def ticker_24h(self, symbol: str, market_type: str = "spot") -> dict:
+        """Fetch the raw Binance 24h rolling ticker for ``symbol``.
+
+        Used as the fundamentals source. Spot returns a dict of price/volume
+        stats; the USD-M futures endpoint returns a list with a single element,
+        so both are normalized to a dict here.
+        """
+        params: dict[str, Any] = {"symbol": symbol}
+        logger.info("Binance %s 24h ticker symbol=%s", market_type, symbol)
+        result = self._call(
+            self._market_caller("ticker", market_type),
+            2,  # flat weight on both spot and USD-M futures
+            **params,
+        )
+        return result if isinstance(result, dict) else result[0]
+
+    def exchange_info(self, symbol: str, market_type: str = "spot") -> dict:
+        """Fetch the raw Binance exchange info entry for one ``symbol``.
+
+        Returns the dict describing the symbol: base/quote assets, trading
+        status, permissions, and spot/margin trading flags. Both the spot and
+        USD-M futures ``exchange_info`` endpoints return a ``symbols`` list
+        covering every symbol, so the one matching ``symbol`` is picked out.
+        """
+        logger.info("Binance %s exchange info symbol=%s", market_type, symbol)
+        result = self._call(
+            self._market_caller("exchange_info", market_type),
+            2,  # flat weight on both spot and USD-M futures
+        )
+        symbols = result.get("symbols") or []
+        for entry in symbols:
+            if entry.get("symbol") == symbol:
+                return dict(entry)
+        return {}  # symbol not present on this market

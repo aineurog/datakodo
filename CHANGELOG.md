@@ -11,9 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core canonical schemas: OHLCV, Trade, OrderBook (Pydantic v2, schema version 1.0).
 - Structured Instrument model with typed asset class extensions.
 - Abstract AdapterInterface and StorageBackend contracts.
+- Canonical Fundamentals schema (common base + asset-class block).
+- Adapter lifecycle: connect/disconnect/close + `with adapter:` support.
+- Client facade (`Client(provider, config=...)`) with a provider registry.
 - Standardized exception hierarchy containing authentication, rate limit,
   symbol not found, and other provider mapped errors.
 - Config system via pydantic-settings with .env support.
+- Configurable output format: pandas, polars, arrow, numpy.
 - Adapter scaffolding for Binance, Alpaca, Polygon, MT5, and IBKR.
 - Each adapter subpackage includes rest, websocket, and mapper modules.
 - Token bucket rate limiter per provider instance.
@@ -23,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Order book maintainer for snapshot + delta L2 book tracking.
 - Timeframe resampling with standard OHLCV aggregation rules.
 - Auto pagination and stitching across large date ranges.
+- Batch / multi-symbol OHLCV fetching (`fetch_ohlcv_batch`).
 - Data quality validation: non negative prices, high >= low, monotonic
   timestamps, duplicate detection.
 - Corporate actions: split and dividend price adjustments.
@@ -31,3 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider extras in pyproject.toml for all five Phase 1 adapters.
 - CI workflow: ruff lint, mypy type check, pytest with coverage on every push.
 - Gated integration test workflow for live API tests.
+
+### Added (Binance)
+- 24h ticker + exchange info fundamentals (`fetch_fundamentals`).
+- Historical trade ticks (`fetch_ticks`), paged and deduped.
+- Order book snapshot (`fetch_orderbook_snapshot`) with depth clamping.
+- Spot + USD-M futures support with request-weight-aware rate limiting.

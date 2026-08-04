@@ -19,6 +19,11 @@ keywords = [
     "crypto",
     "equities",
     "forex",
+    "binance",
+    "resampling",
+    "batch-fetch",
+    "fundamentals",
+    "websocket",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",

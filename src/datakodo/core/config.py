@@ -41,6 +41,10 @@ class Config(BaseSettings):
     display_timezone: str = "UTC"
     """Timezone for display purposes. Storage is always UTC."""
 
+    # --- resampling (design doc sec 7) ---
+    flag_resample: bool = True
+    """Emit a warning when a non-native timeframe is derived by resampling."""
+
     # --- binance adapter (design doc sec 13/14: single user-editable .env) ---
     binance_api_key: str = ""
     """Binance API key. Public market data needs no key."""

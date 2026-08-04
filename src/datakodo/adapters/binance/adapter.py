@@ -7,10 +7,17 @@ storage backend to form a simple ingestion pipeline.
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 
-from datakodo.adapters.binance.mapper import map_ohlcv, map_orderbook, map_ticks, map_trades
+from datakodo.adapters.binance.mapper import (
+    map_fundamentals,
+    map_ohlcv,
+    map_orderbook,
+    map_ticks,
+    map_trades,
+)
 from datakodo.adapters.binance.rest import BinanceREST
 from datakodo.adapters.binance.ws import BinanceWS
 from datakodo.core.config import Config
@@ -18,9 +25,11 @@ from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import DataNotAvailableError
 from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
 from datakodo.core.interfaces import AdapterInterface
-from datakodo.core.schemas import OrderBook, Trade
+from datakodo.core.schemas import Fundamentals, OrderBook, Trade
 from datakodo.core.timeframe import BINANCE_MAP
+from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
+from datakodo.ops.resample import pick_source_timeframe, resample
 from datakodo.ops.validation import drop_incomplete_bars, validate_ohlcv
 from datakodo.storage.cache import build_cache_key
 from datakodo.storage.parquet import ParquetBackend
@@ -52,6 +61,12 @@ class BinanceAdapter(AdapterInterface):
     supports_orderbook_snapshot = True
     supports_streaming_orderbook = True
     supports_streaming_ticks = True
+    supports_fundamentals = True
+
+    native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
+    """Binance offers every canonical timeframe natively, so no resampling is
+    needed for Binance — the mechanism (design doc sec 7) still runs for
+    adapters that restrict this list."""
 
     def __init__(
         self,
@@ -107,7 +122,8 @@ class BinanceAdapter(AdapterInterface):
         market_type: str = "",
         persist: bool | None = None,
         include_live: bool = False,
-    ) -> pd.DataFrame:
+        output_format: str | None = None,
+    ) -> Any:
         """Fetch OHLCV candles for a date range, validating and persisting them.
 
         ``market_type`` selects spot or USD-M futures klines; it defaults to the
@@ -117,9 +133,60 @@ class BinanceAdapter(AdapterInterface):
         bar in the return value — though it is never written to cache. When
         ``persist`` is true (default comes from config), the closed bars are
         written to the configured storage backend under a deterministic cache key.
+
+        If ``timeframe`` is not one of the adapter's ``native_timeframes``
+        (design doc sec 7), the nearest smaller native timeframe is fetched and
+        resampled up — controlled by ``Config.flag_resample`` for silent/flagged.
+        Resampled output is always fully closed.
+
+        ``output_format`` selects the user-facing representation (design doc
+        sec 12): pandas (default), polars, arrow, or numpy — per-call override
+        of ``Config.output_format``.
         """
         market_type = market_type or self._config.binance_market_type
         persist = self._config.cache_enabled if persist is None else persist
+        tf = Timeframe(timeframe)
+
+        if tf in self.native_timeframes:
+            df = self._fetch_ohlcv_native(symbol, timeframe, start, end, market_type, include_live)
+        else:
+            source_tf = pick_source_timeframe(tf, self.native_timeframes)
+            self._log_resample(timeframe, source_tf.value)
+            source = self._fetch_ohlcv_native(
+                symbol, source_tf.value, start, end, market_type, include_live=False
+            )
+            df = resample(source, tf)
+            validate_ohlcv(df)
+            logger.info(
+                "Resampled %s -> %s (%d bars) for %s %s",
+                source_tf.value, timeframe, len(df), market_type, symbol,
+            )
+
+        if persist:
+            # Only closed/final data is ever cached (design doc sec 17).
+            closed = df if not include_live else drop_incomplete_bars(df, timeframe)
+            key = build_cache_key(
+                f"binance-{market_type}", symbol, timeframe, (start.isoformat(), end.isoformat())
+            )
+            self._storage.write(key, closed)
+            logger.info("Persisted OHLCV to cache key %s", key)
+        return to_output_format(df, output_format or self._config.output_format)
+
+    def _fetch_ohlcv_native(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        market_type: str,
+        include_live: bool,
+    ) -> pd.DataFrame:
+        """Fetch ``timeframe`` candles that the provider offers natively.
+
+        Shared by ``fetch_ohlcv`` for the direct path and as the source when
+        resampling. Returns validated closed bars; ``include_live`` additionally
+        keeps the still-forming bar in the return value only.
+        """
         tf = Timeframe(timeframe)
         interval = BINANCE_MAP[tf]
 
@@ -143,17 +210,18 @@ class BinanceAdapter(AdapterInterface):
             )
 
         validate_ohlcv(df)
-        logger.info("Validated %d OHLCV rows for %s %s", len(df), market_type, symbol)
-
-        if persist:
-            # Only closed/final data is ever cached (design doc sec 17).
-            closed = df if not include_live else drop_incomplete_bars(df, timeframe)
-            key = build_cache_key(
-                f"binance-{market_type}", symbol, timeframe, (start.isoformat(), end.isoformat())
-            )
-            self._storage.write(key, closed)
-            logger.info("Persisted OHLCV to cache key %s", key)
+        logger.info("Fetched %d %s OHLCV rows for %s %s", len(df), timeframe, market_type, symbol)
         return df
+
+    def _log_resample(self, requested: str, source: str) -> None:
+        """Warn (or log quietly) that ``requested`` is derived by resampling."""
+        if self._config.flag_resample:
+            logger.warning(
+                "%s has no native %s klines; fetching %s and resampling",
+                self.__class__.__name__, requested, source,
+            )
+        else:
+            logger.info("Deriving %s from %s by resampling", requested, source)
 
     def fetch_ticks(  # type: ignore[override]  # typed signature narrower than base
         self,
@@ -205,6 +273,30 @@ class BinanceAdapter(AdapterInterface):
             len(book.asks),
         )
         return book
+
+    def fetch_fundamentals(  # type: ignore[override]  # typed subset of base
+        self,
+        symbol: str,
+        *,
+        market_type: str = "",
+    ) -> Fundamentals:
+        """Fetch canonical fundamentals for ``symbol`` (design doc sec 3).
+
+        Combines the Binance 24h rolling ticker (live price/volume stats) with
+        exchange info (base/quote asset, trading status, permissions). Returns a
+        canonical ``Fundamentals`` record with a ``CryptoFundamentals`` block.
+        """
+        market_type = market_type or self._config.binance_market_type
+        ticker = self._rest.ticker_24h(symbol, market_type=market_type)
+        info = self._rest.exchange_info(symbol, market_type=market_type)
+        fundamentals = map_fundamentals(ticker, info)
+        logger.info(
+            "Fetched %s fundamentals for %s (latest=%s)",
+            market_type,
+            symbol,
+            fundamentals.latest_price,
+        )
+        return fundamentals
 
     # -- streaming (async) --
 
