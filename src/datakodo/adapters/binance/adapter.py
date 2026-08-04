@@ -181,9 +181,7 @@ class BinanceAdapter(AdapterInterface):
                 market_type=market_type,
             )
         else:
-            raw = self._rest.ticks(
-                symbol, start, end, limit=limit, market_type=market_type
-            )
+            raw = self._rest.ticks(symbol, start, end, limit=limit, market_type=market_type)
         trades = map_ticks(raw)
         logger.info("Fetched %d %s trades for %s", len(trades), market_type, symbol)
         return trades
@@ -197,9 +195,7 @@ class BinanceAdapter(AdapterInterface):
     ) -> OrderBook:
         """Fetch a single canonical order book snapshot for ``symbol``."""
         market_type = market_type or self._config.binance_market_type
-        raw = self._rest.orderbook(
-            symbol, limit=limit, market_type=market_type
-        )
+        raw = self._rest.orderbook(symbol, limit=limit, market_type=market_type)
         book = map_orderbook(raw)
         logger.info(
             "Fetched %s order book for %s (bids=%d asks=%d)",

@@ -74,9 +74,7 @@ class BinanceWS:
                 message = await stream.recv()
                 # Futures multiplex sockets wrap the payload under a "data" key.
                 payload = (
-                    message["data"]
-                    if isinstance(message, dict) and "data" in message
-                    else message
+                    message["data"] if isinstance(message, dict) and "data" in message else message
                 )
                 sent += 1
                 yield payload

@@ -71,10 +71,6 @@ def map_orderbook(raw: dict) -> OrderBook:
     asks_raw = raw.get("asks") or []
     return OrderBook(
         timestamp=timestamp.to_pydatetime(),
-        bids=[
-            OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in bids_raw
-        ],
-        asks=[
-            OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in asks_raw
-        ],
+        bids=[OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in bids_raw],
+        asks=[OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in asks_raw],
     )

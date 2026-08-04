@@ -338,9 +338,7 @@ class BinanceREST:
 
         return rows
 
-    def orderbook(
-        self, symbol: str, *, limit: int = 20, market_type: str = "spot"
-    ) -> dict:
+    def orderbook(self, symbol: str, *, limit: int = 20, market_type: str = "spot") -> dict:
         """Fetch a raw Binance order book depth snapshot.
 
         Returns the depth dict with ``bids`` and ``asks`` lists of
@@ -350,9 +348,7 @@ class BinanceREST:
         """
         depth_limit = _clamp_depth_limit(limit, market_type)
         params: dict[str, Any] = {"symbol": symbol, "limit": depth_limit}
-        logger.info(
-            "Binance %s order book symbol=%s limit=%s", market_type, symbol, depth_limit
-        )
+        logger.info("Binance %s order book symbol=%s limit=%s", market_type, symbol, depth_limit)
         return dict(
             self._call(
                 self._market_caller("order_book", market_type),

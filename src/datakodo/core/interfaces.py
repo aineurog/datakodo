@@ -49,9 +49,7 @@ class AdapterInterface(ABC):
         Adaptations return canonical ``OrderBook`` data. Default raises so
         an adapter declaring ``supports_orderbook_snapshot`` must override it.
         """
-        raise NotSupportedError(
-            "fetch_orderbook_snapshot is not supported by this adapter"
-        )
+        raise NotSupportedError("fetch_orderbook_snapshot is not supported by this adapter")
 
     # --- streaming (async) ---
 
