@@ -39,8 +39,19 @@ class BinanceWS:
             testnet=self._config.binance_testnet,
         )
 
-    async def _messages(self, symbol: str, market_type: str, depth: bool) -> AsyncIterator:
-        """Open the relevant socket and yield its decoded messages."""
+    async def _messages(
+        self,
+        symbol: str,
+        market_type: str,
+        depth: bool,
+        max_messages: int | None = None,
+    ) -> AsyncIterator:
+        """Open the relevant socket and yield its decoded messages.
+
+        With ``max_messages`` set, the stream closes itself cleanly after that
+        many messages — releasing the WebSocket and its connection — so callers
+        can sample a few messages without leaking resources.
+        """
         client = await self._client()
         manager = BinanceSocketManager(client)
         if depth:
@@ -56,27 +67,39 @@ class BinanceWS:
                 else manager.aggtrade_socket(symbol)
             )
 
+        stream = await socket.__aenter__()
         try:
-            async with socket as stream:
-                while True:
-                    message = await stream.recv()
-                    # Futures multiplex sockets wrap the payload under a "data" key.
-                    yield (
-                        message["data"]
-                        if isinstance(message, dict) and "data" in message
-                        else message
-                    )
+            sent = 0
+            while True:
+                message = await stream.recv()
+                # Futures multiplex sockets wrap the payload under a "data" key.
+                payload = (
+                    message["data"]
+                    if isinstance(message, dict) and "data" in message
+                    else message
+                )
+                sent += 1
+                yield payload
+                if max_messages is not None and sent >= max_messages:
+                    break
         finally:
+            await socket.close()
             await client.close_connection()
 
-    async def trade_stream(self, symbol: str, market_type: str = "spot") -> AsyncIterator:
+    async def trade_stream(
+        self, symbol: str, market_type: str = "spot", max_messages: int | None = None
+    ) -> AsyncIterator:
         """Yield raw aggregate-trade messages for ``symbol`` (spot or futures)."""
         logger.info("Starting Binance trade stream for %s (%s)", symbol, market_type)
-        async for msg in self._messages(symbol, market_type, depth=False):
+        async for msg in self._messages(
+            symbol, market_type, depth=False, max_messages=max_messages
+        ):
             yield msg
 
-    async def orderbook_stream(self, symbol: str, market_type: str = "spot") -> AsyncIterator:
+    async def orderbook_stream(
+        self, symbol: str, market_type: str = "spot", max_messages: int | None = None
+    ) -> AsyncIterator:
         """Yield raw order book depth messages for ``symbol`` (spot or futures)."""
         logger.info("Starting Binance order book stream for %s (%s)", symbol, market_type)
-        async for msg in self._messages(symbol, market_type, depth=True):
+        async for msg in self._messages(symbol, market_type, depth=True, max_messages=max_messages):
             yield msg

@@ -8,6 +8,8 @@ always re-fetched live.
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from datakodo.core.timeframe import timeframe_delta
+
 
 @dataclass
 class CacheEntry:
@@ -33,13 +35,20 @@ def build_cache_key(provider: str, symbol: str, timeframe: str, date_range: tupl
 
 
 def is_bar_closed(timestamp: datetime, timeframe: str) -> bool:
-    """Return True if the candle/bar ending at *timestamp* is complete.
+    """Return True if the candle/bar that *opened* at ``timestamp`` is closed.
 
-    A bar is closed when its end time is in the past relative to now.
-    The current (still-forming) bar is always open.
+    ``timestamp`` is the bar's **open** time (as stored in the canonical OHLCV
+    ``timestamp`` column). A bar is closed once its full duration has elapsed,
+    i.e. when ``open_time + interval <= now``. The current (still-forming)
+    bar is always open.
+
+    Raises ``ValueError`` for an unknown ``timeframe``.
     """
     now = datetime.now(UTC)
-    return timestamp < now
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    delta = timeframe_delta(timeframe)
+    return timestamp + delta <= now
 
 
 def compute_expiry(timeframe: str) -> datetime:

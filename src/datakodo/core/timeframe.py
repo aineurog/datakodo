@@ -1,8 +1,12 @@
 """Canonical-to-provider timeframe mapping.
 
 Each adapter maps canonical timeframes (1m, 5m, 1h, ...) to its own
-provider-specific string format.
+provider-specific string format. This module is also the single source of
+truth for the duration of each canonical timeframe, used centrally (e.g. to
+decide when a candle/bar is closed and to size pagination windows).
 """
+
+from datetime import timedelta
 
 from datakodo.core.enums import Timeframe
 
@@ -44,3 +48,31 @@ IBKR_MAP: dict[Timeframe, str] = {
     Timeframe.W1: "1 week",
     Timeframe.MN1: "1 month",
 }
+
+# Duration of one candle of each canonical timeframe. Months are approximated
+# as 30 days (a documented, deterministic choice used for pagination sizing).
+_TIMEFRAME_DELTA: dict[Timeframe, timedelta] = {
+    Timeframe.M1: timedelta(minutes=1),
+    Timeframe.M5: timedelta(minutes=5),
+    Timeframe.M15: timedelta(minutes=15),
+    Timeframe.M30: timedelta(minutes=30),
+    Timeframe.H1: timedelta(hours=1),
+    Timeframe.H4: timedelta(hours=4),
+    Timeframe.D1: timedelta(days=1),
+    Timeframe.W1: timedelta(weeks=1),
+    Timeframe.MN1: timedelta(days=30),
+}
+
+
+def timeframe_delta(timeframe: Timeframe | str) -> timedelta:
+    """Return the duration of a single candle/bar of ``timeframe``.
+
+    Accepts a ``Timeframe`` enum or a canonical string (``"1h"``, ``"1m"``).
+    Raises ``ValueError`` for unknown timeframes.
+    """
+    if isinstance(timeframe, str):
+        timeframe = Timeframe(timeframe)
+    delta = _TIMEFRAME_DELTA.get(timeframe)
+    if delta is None:
+        raise ValueError(f"Unknown timeframe: {timeframe}")
+    return delta

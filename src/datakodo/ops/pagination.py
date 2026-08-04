@@ -7,25 +7,14 @@ manually.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import pandas as pd
 
 from datakodo.core.enums import Timeframe
+from datakodo.core.timeframe import timeframe_delta
 
 logger = logging.getLogger(__name__)
-
-_TIMEFRAME_DELTA: dict[Timeframe, timedelta] = {
-    Timeframe.M1: timedelta(minutes=1),
-    Timeframe.M5: timedelta(minutes=5),
-    Timeframe.M15: timedelta(minutes=15),
-    Timeframe.M30: timedelta(minutes=30),
-    Timeframe.H1: timedelta(hours=1),
-    Timeframe.H4: timedelta(hours=4),
-    Timeframe.D1: timedelta(days=1),
-    Timeframe.W1: timedelta(weeks=1),
-    Timeframe.MN1: timedelta(days=30),
-}
 
 
 def paginate(
@@ -48,10 +37,7 @@ def paginate(
     if start >= end:
         raise ValueError(f"start ({start}) must be before end ({end}).")
 
-    delta = _TIMEFRAME_DELTA.get(timeframe)
-    if delta is None:
-        raise ValueError(f"Unknown timeframe: {timeframe}")
-
+    delta = timeframe_delta(timeframe)
     chunk_delta = delta * max_per_request
     chunks: list[pd.DataFrame] = []
     cursor = start
