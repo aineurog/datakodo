@@ -62,3 +62,14 @@ class Config(BaseSettings):
     """Binance token-bucket refill rate (tokens/sec); 100/s matches spot."""
     binance_rate_limit_burst: int = 1000
     """Binance token-bucket burst capacity."""
+
+    # --- mt5 adapter (design doc sec 13/14: terminal-based auth) ---
+    mt5_login: int | None = None
+    """MT5 terminal account login (int). None falls back to the default terminal."""
+    mt5_password: str = ""
+    """MT5 terminal account password."""
+    mt5_server: str = ""
+    """MT5 broker server name (e.g. 'FusionMarkets-Demo')."""
+    mt5_terminal_path: str = r"C:\Program Files\MetaTrader 5"
+    """Path to the MT5 terminal install folder (or terminal64.exe directly).
+    Defaults to the standard Windows install location."""
