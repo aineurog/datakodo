@@ -242,6 +242,7 @@ class TestTerminalFeedback:
         assert any("No XAUUSD history returned" in r.message for r in caplog.records)
 
 
+@needs_mt5
 class TestMT5AdapterReal:
     def test_fetch_ohlcv_returns_canonical_frame(self):
         from datetime import timedelta
