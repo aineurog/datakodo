@@ -73,3 +73,8 @@ class Config(BaseSettings):
     mt5_terminal_path: str = r"C:\Program Files\MetaTrader 5"
     """Path to the MT5 terminal install folder (or terminal64.exe directly).
     Defaults to the standard Windows install location."""
+    mt5_rate_limit_rate: float = 5.0
+    """MT5 token-bucket refill rate (tokens/sec). MT5 is a local, non-weight
+    based terminal, so this is a conservative throttle on data requests."""
+    mt5_rate_limit_burst: int = 10
+    """MT5 token-bucket burst capacity."""

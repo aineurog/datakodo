@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from datakodo.core.config import Config
-from datakodo.core.exceptions import ConnectionError
+from datakodo.core.exceptions import ConnectionError, RateLimitError
+from datakodo.ratelimit.limiter import TokenBucket
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,12 @@ class MT5Terminal:
         self._config = config or Config()
         self._mt5: Any = None
         self._connected = False
+        # Conservative token bucket around data requests (design doc sec 16).
+        # MT5 throttles symbol/data requests; see Config.mt5_rate_limit_*.
+        self._limiter = TokenBucket(
+            rate=self._config.mt5_rate_limit_rate,
+            burst=self._config.mt5_rate_limit_burst,
+        )
 
     def server_offset_seconds(self, symbol: str) -> int:
         """Difference between the server clock and UTC, in seconds.
@@ -146,6 +153,15 @@ class MT5Terminal:
         """True when the terminal connection is established."""
         return self._connected
 
+    def _acquire(self, weight: int = 1) -> None:
+        """Consume request tokens, raising ``RateLimitError`` when empty."""
+        if not self._limiter.consume(weight):
+            retry_after = self._limiter.wait_time(weight)
+            raise RateLimitError(
+                f"MT5 rate limit exceeded. Retry after {retry_after:.1f}s.",
+                retry_after=retry_after,
+            )
+
     def copy_rates_range(self, symbol: str, timeframe: int, start: datetime, end: datetime) -> Any:
         """Fetch raw OHLCV rates for *symbol* over the given date range.
 
@@ -160,6 +176,7 @@ class MT5Terminal:
         """
         if not self._connected:
             raise ConnectionError("MT5 terminal is not connected.")
+        self._acquire(1)
         start_utc = _as_utc(start)
         end_utc = _as_utc(end)
         shift = timedelta(seconds=self.server_offset_seconds(symbol))
@@ -180,3 +197,32 @@ class MT5Terminal:
             )
             return None
         return rates
+
+    # -- symbol metadata (spot vs futures classification) --
+
+    def symbol_info(self, symbol: str) -> Any:
+        """Return the raw ``SymbolInfo`` tuple for *symbol*, or ``None``.
+
+        The tuple carries ``trade_calc_mode``, ``path`` (Market Watch tree),
+        contract/tick sizes, currencies, and expiry — the fields used to
+        classify a symbol as spot, futures, CFD, etc. (``map_instrument``).
+        """
+        if not self._connected:
+            raise ConnectionError("MT5 terminal is not connected.")
+        self._acquire(1)
+        return self._mt5.symbol_info(symbol)
+
+    def futures_calc_modes(self) -> frozenset[int]:
+        """``trade_calc_mode`` integers that identify futures contracts.
+
+        MT5 exposes these as module-level ``SYMBOL_CALC_MODE_*`` constants
+        whose numeric values vary by package build (unlike the MQL5 docs),
+        so they are read from the live module rather than hardcoded.
+        """
+        names = (
+            "SYMBOL_CALC_MODE_FUTURES",
+            "SYMBOL_CALC_MODE_EXCH_FUTURES",
+        )
+        if self._mt5 is None:
+            return frozenset()
+        return frozenset(getattr(self._mt5, name) for name in names if hasattr(self._mt5, name))
