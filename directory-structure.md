@@ -107,7 +107,8 @@ datakodo/
 │   └── fixtures/                    # golden recorded API responses per provider (sec 26)
 │
 ├── docs/
-│   ├── usage.md
+│   ├── binance.md                   # per-provider usage: Binance (sec 29)
+│   ├── mt5.md                       # per-provider usage: MetaTrader 5 (sec 29)
 │   └── adapters/                    # per-provider: capabilities, cost tier, limits (sec 29)
 │
 └── .github/

@@ -212,6 +212,29 @@ class MT5Terminal:
         self._acquire(1)
         return self._mt5.symbol_info(symbol)
 
+    def symbol_select(self, symbol: str, enable: bool = True) -> bool:
+        """Add/remove ``symbol`` from the MarketWatch window, returning success.
+
+        MT5 only subscribes quotes/rates for symbols visible in MarketWatch
+        (design doc sec "reference"). Calling ``symbol_select(symbol, True)``
+        before reading data ensures history is available for the symbol.
+        """
+        if not self._connected:
+            raise ConnectionError("MT5 terminal is not connected.")
+        self._acquire(1)
+        return bool(self._mt5.symbol_select(symbol, enable))
+
+    def symbol_info_tick(self, symbol: str) -> Any:
+        """Return the latest raw ``Tick`` tuple for *symbol*, or ``None``.
+
+        The tick carries bid/ask/last prices, last volume, and the quote time
+        — the live-price inputs used by ``map_fundamentals``.
+        """
+        if not self._connected:
+            raise ConnectionError("MT5 terminal is not connected.")
+        self._acquire(1)
+        return self._mt5.symbol_info_tick(symbol)
+
     def futures_calc_modes(self) -> frozenset[int]:
         """``trade_calc_mode`` integers that identify futures contracts.
 
@@ -219,10 +242,25 @@ class MT5Terminal:
         whose numeric values vary by package build (unlike the MQL5 docs),
         so they are read from the live module rather than hardcoded.
         """
-        names = (
+        return self._calc_modes(
             "SYMBOL_CALC_MODE_FUTURES",
             "SYMBOL_CALC_MODE_EXCH_FUTURES",
         )
+
+    def forex_calc_modes(self) -> frozenset[int]:
+        """``trade_calc_mode`` integers that identify spot forex pairs.
+
+        Value resolution mirrors ``futures_calc_modes`` — the forex calc-mode
+        integers (``SYMBOL_CALC_MODE_FOREX`` and ``..._FOREX_NO_LEVERAGE``)
+        also vary by package build, so they are read from the live module.
+        """
+        return self._calc_modes(
+            "SYMBOL_CALC_MODE_FOREX",
+            "SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE",
+        )
+
+    def _calc_modes(self, *names: str) -> frozenset[int]:
+        """Resolve the numeric values of the given ``SYMBOL_CALC_MODE_*`` names."""
         if self._mt5 is None:
             return frozenset()
         return frozenset(getattr(self._mt5, name) for name in names if hasattr(self._mt5, name))

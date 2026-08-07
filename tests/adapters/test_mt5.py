@@ -14,7 +14,7 @@ from datakodo.adapters.mt5.adapter import MT5Adapter
 from datakodo.adapters.mt5.mapper import VOLUME_BASELINES, map_instrument, map_ohlcv
 from datakodo.adapters.mt5.terminal import MT5Terminal, _as_utc
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import ConnectionError, ProviderError, RateLimitError
 
 # MT5 CopyRates returns a numpy structured array with these named columns.
@@ -60,6 +60,11 @@ def _symbol_info(**overrides) -> SimpleNamespace:
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
+
+
+def _make_adapter(*, cache: bool = False) -> MT5Adapter:
+    """Build an offline ``MT5Adapter``; cache off unless requested."""
+    return MT5Adapter(config=Config(cache_enabled=cache))
 
 
 class FakeMT5Terminal(MT5Terminal):
@@ -313,6 +318,16 @@ class TestMapInstrument:
         with pytest.raises(ProviderError, match="No MT5 symbol info"):
             map_instrument("EURUSD", None)
 
+    def test_forex_modes_are_resolved_not_hardcoded(self):
+        """Spot forex detection follows the passed calc-mode set (build-aware)."""
+        info = _symbol_info(trade_calc_mode=5, path="Custom\\PAIR")  # FOREX_NO_LEVERAGE
+        # Same numeric value is treated as forex only if it is in forex_modes.
+        inst = map_instrument("PAIR", info, forex_modes=frozenset({5}))
+        assert inst.asset_class == AssetClass.FOREX
+        # A build where the value means something else is NOT forex.
+        inst = map_instrument("PAIR", info, forex_modes=frozenset({0}))
+        assert inst.asset_class == AssetClass.CFD
+
 
 # --- terminal.MT5Terminal (real connection) --------------------------------
 
@@ -494,9 +509,8 @@ class TestMT5AdapterMocked:
     """Offline adapter tests: canonical columns, delegation, empty result."""
 
     def test_fetch_ohlcv_returns_canonical_frame(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         adapter._terminal = FakeMT5Terminal()
         df = adapter.fetch_ohlcv(
             "EURUSD",
@@ -518,9 +532,8 @@ class TestMT5AdapterMocked:
         assert df["session"].nunique() == 1
 
     def test_fetch_ohlcv_delegates_symbol_timeframe_start_end(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         terminal = FakeMT5Terminal()
         adapter._terminal = terminal
         start = datetime(2024, 5, 31, tzinfo=UTC)
@@ -533,9 +546,8 @@ class TestMT5AdapterMocked:
         assert chunk_end == end
 
     def test_fetch_ohlcv_empty_history_returns_canonical_schema(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         terminal = FakeMT5Terminal()
         adapter._terminal = terminal
 
@@ -562,9 +574,8 @@ class TestMT5AdapterMocked:
         ]
 
     def test_instrument_delegates_to_terminal_symbol_info(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         terminal = FakeMT5Terminal()
         adapter._terminal = terminal
 
@@ -581,9 +592,8 @@ class TestMT5AdapterMocked:
         assert inst.instrument_type == InstrumentType.SPOT
 
     def test_instrument_unknown_symbol_raises(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
 
         class NoInfoTerminal(FakeMT5Terminal):
             def symbol_info(self, symbol):
@@ -597,9 +607,8 @@ class TestMT5AdapterMocked:
             adapter.instrument("NOPE")
 
     def test_instrument_futures_market_type(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
 
         class FuturesTerminal(FakeMT5Terminal):
             def symbol_info(self, symbol):
@@ -623,9 +632,8 @@ class TestMT5AdapterMocked:
         assert inst.future.expiry == "2024-12-17"
 
     def test_instrument_not_connected_raises(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()  # never connected
+        adapter = _make_adapter()  # never connected
         with pytest.raises(ConnectionError):
             adapter.instrument("EURUSD")
 
@@ -637,9 +645,8 @@ class TestPagination:
     """Multi-chunk ranges return complete, monotonic, unique timestamps."""
 
     def test_large_range_is_paginated_into_multiple_requests(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         terminal = FakeMT5Terminal()
         adapter._terminal = terminal
         start = datetime(2024, 5, 31, tzinfo=UTC)
@@ -651,9 +658,8 @@ class TestPagination:
         assert not df["timestamp"].duplicated().any()
 
     def test_full_range_is_complete_and_stitched(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         adapter._terminal = FakeMT5Terminal()
         start = datetime(2024, 5, 31, tzinfo=UTC)
         end = start + timedelta(minutes=2500)  # forces 3 chunks of 1000
@@ -665,9 +671,8 @@ class TestPagination:
         assert (df["timestamp"].diff().dropna() == timedelta(minutes=1)).all()
 
     def test_single_chunk_when_range_fits(self):
-        from datakodo.adapters.mt5.adapter import MT5Adapter
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         terminal = FakeMT5Terminal()
         adapter._terminal = terminal
         start = datetime(2024, 5, 31, tzinfo=UTC)
@@ -787,7 +792,7 @@ class TestMT5AdapterReal:
 
         from datakodo.core.exceptions import ConnectionError
 
-        adapter = MT5Adapter()
+        adapter = _make_adapter()
         start = datetime.now(UTC) - timedelta(hours=1)
         with pytest.raises(ConnectionError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, datetime.now(UTC))
@@ -834,7 +839,7 @@ class TestMT5AdapterReal:
 
         with MT5Adapter(terminal_path="") as adapter:
             with caplog.at_level(logging.WARNING):
-                df = adapter.fetch_ohlcv("XAUUSD", "4h", start, end)
+                df = adapter.fetch_ohlcv("XAUUSD", "4h", start, end, force_refresh=True)
 
         assert len(df) > 0
         gaps = detect_gaps(df, "4h")
@@ -955,7 +960,7 @@ class TestGapDetection:
                 return arr
 
         # Create adapter with our gappy terminal
-        adapter = MT5Adapter(terminal_path="")
+        adapter = MT5Adapter(terminal_path="", config=Config(cache_enabled=False))
         adapter._terminal = GappyTerminal(config=Config())
         adapter._terminal._connected = True
         adapter._terminal._mt5 = type(
@@ -998,6 +1003,7 @@ class TestMT5Adapter:
         assert adapter.supports_ohlcv is True
         assert adapter.supports_ticks is False
         assert adapter.supports_streaming_orderbook is False
+        assert adapter.supports_fundamentals is True
 
     def test_fetch_ohlcv_not_connected_raises(self):
         from datetime import datetime
@@ -1008,6 +1014,241 @@ class TestMT5Adapter:
         start = datetime.now(UTC) - timedelta(hours=1)
         with pytest.raises(ConnectionError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, datetime.now(UTC))
+
+
+# --- Step 8: batch, resample, storage, output format, fundamentals -----------
+
+
+class TestFetchOHLCVBatch:
+    """fetch_ohlcv_batch runs symbols concurrently via the shared base."""
+
+    def test_batch_returns_mapping(self):
+        adapter = _make_adapter()
+        terminal = FakeMT5Terminal()
+        adapter._terminal = terminal
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        result = adapter.fetch_ohlcv_batch(
+            ["EURUSD", "GBPUSD"],
+            "1h",
+            start,
+            start + timedelta(hours=1),
+            persist=False,
+        )
+        assert set(result) == {"EURUSD", "GBPUSD"}
+        for df in result.values():
+            assert list(df.columns) == [
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "session",
+            ]
+            assert len(df) > 0
+
+    def test_batch_combine(self):
+        adapter = _make_adapter()
+        adapter._terminal = FakeMT5Terminal()
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        combined = adapter.fetch_ohlcv_batch(
+            ["EURUSD", "GBPUSD"],
+            "1h",
+            start,
+            start + timedelta(hours=1),
+            combine=True,
+            persist=False,
+        )
+        assert "symbol" in combined.columns
+        assert set(combined["symbol"]) == {"EURUSD", "GBPUSD"}
+        assert len(combined) == len(combined["symbol"])
+
+    def test_batch_empty_symbols_raises(self):
+        adapter = _make_adapter()
+        with pytest.raises(ValueError, match="At least one symbol"):
+            adapter.fetch_ohlcv_batch(
+                [], "1h", datetime(2024, 5, 31, tzinfo=UTC), datetime(2024, 6, 1, tzinfo=UTC)
+            )
+
+
+class TestResample:
+    """Non-native timeframes are derived by resampling the nearest source."""
+
+    class _Restricted(MT5Adapter):
+        """MT5 adapter pretending to offer only 1m and 1h natively."""
+
+        native_timeframes = (Timeframe.M1, Timeframe.H1)
+
+    def test_native_timeframes_all_canonical(self):
+        assert MT5Adapter.native_timeframes == tuple(Timeframe)
+
+    def test_pick_source_timeframe_selects_largest_smaller(self):
+        from datakodo.ops.resample import pick_source_timeframe
+
+        native = (Timeframe.M1, Timeframe.H1, Timeframe.D1)
+        assert pick_source_timeframe(Timeframe.H4, native) == Timeframe.H1
+
+    def test_resamples_non_native_timeframe(self, caplog):
+        """4h requested, only 1m/1h native -> fetch source and resample up."""
+        adapter = TestResample._Restricted()
+        adapter._terminal = FakeMT5Terminal()
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        with caplog.at_level(logging.WARNING):
+            df = adapter.fetch_ohlcv(
+                "EURUSD",
+                "4h",
+                start,
+                start + timedelta(hours=8),
+                persist=False,
+            )
+        assert len(df) > 0
+        assert df["timestamp"].is_monotonic_increasing
+        # The resample branch was taken (warned by _log_resample).
+        assert any("resampling" in r.message for r in caplog.records)
+
+
+class TestStorageAndOutput:
+    """Parquet persistence round-trips and honors output_format."""
+
+    def test_persist_and_cache_read(self, tmp_path):
+        from datakodo.storage.parquet import ParquetBackend
+
+        storage = ParquetBackend(base_dir=str(tmp_path))
+        adapter = MT5Adapter(storage=storage, config=Config(cache_enabled=True))
+        terminal = FakeMT5Terminal()
+        adapter._terminal = terminal
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        end = start + timedelta(hours=2)
+        first = adapter.fetch_ohlcv("EURUSD", "1h", start, end)
+        assert len(first) > 0
+        # A second call hits the cache without re-touching the terminal.
+        terminal.calls.clear()
+        second = adapter.fetch_ohlcv("EURUSD", "1h", start, end)
+        assert terminal.calls == []
+        assert len(second) == len(first)
+
+    def test_force_refresh_bypasses_cache(self, tmp_path):
+        from datakodo.storage.parquet import ParquetBackend
+
+        storage = ParquetBackend(base_dir=str(tmp_path))
+        adapter = MT5Adapter(storage=storage, config=Config(cache_enabled=True))
+        terminal = FakeMT5Terminal()
+        adapter._terminal = terminal
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        end = start + timedelta(hours=2)
+        adapter.fetch_ohlcv("EURUSD", "1h", start, end)
+        terminal.calls.clear()
+        adapter.fetch_ohlcv("EURUSD", "1h", start, end, force_refresh=True)
+        assert len(terminal.calls) == 1  # provider hit again
+
+    def test_output_format_polars(self, tmp_path):
+        from datakodo.storage.parquet import ParquetBackend
+
+        adapter = MT5Adapter(
+            storage=ParquetBackend(base_dir=str(tmp_path)),
+            config=Config(cache_enabled=False),
+        )
+        adapter._terminal = FakeMT5Terminal()
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        out = adapter.fetch_ohlcv(
+            "EURUSD", "1h", start, start + timedelta(hours=2), output_format="polars"
+        )
+        assert type(out).__name__ == "DataFrame"  # polars.DataFrame
+        assert out.height > 0
+
+    def test_persist_disabled_no_write(self, tmp_path):
+        adapter = MT5Adapter(config=Config(cache_enabled=True, cache_dir=tmp_path))
+        terminal = FakeMT5Terminal()
+        adapter._terminal = terminal
+        start = datetime(2024, 5, 31, tzinfo=UTC)
+        adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(hours=2), persist=False)
+        assert terminal.calls  # data path exercised
+        # persist=False must not have written to the configured cache dir
+        assert not any(tmp_path.rglob("*.parquet"))
+
+
+class TestFundamentals:
+    """fetch_fundamentals returns canonical Fundamentals from symbol data."""
+
+    def test_fetch_fundamentals_mocked(self):
+        from datakodo.adapters.mt5.mapper import map_fundamentals
+        from datakodo.core.schemas import Fundamentals
+
+        info = _symbol_info(name="EURUSD", path="Forex\\EURUSD")
+        tick = SimpleNamespace(time=1717171200, last=1.105, bid=1.104, ask=1.106)
+        f = map_fundamentals("EURUSD", info, tick=tick, futures_modes=frozenset({33}))
+        assert isinstance(f, Fundamentals)
+        assert f.symbol == "EURUSD"
+        assert f.asset_class == AssetClass.FOREX
+        assert f.instrument_type == InstrumentType.SPOT
+        assert f.currency == "USD"
+        assert f.latest_price == 1.105
+        assert f.timestamp is not None
+
+    def test_fetch_fundamentals_no_tick_uses_info(self):
+        from datakodo.adapters.mt5.mapper import map_fundamentals
+
+        info = _symbol_info(name="EURUSD", bid=1.102, path="Forex\\EURUSD")
+        f = map_fundamentals("EURUSD", info, tick=None)
+        assert f.latest_price == 1.102
+
+    def test_fetch_fundamentals_none_info_raises(self):
+        from datakodo.adapters.mt5.mapper import map_fundamentals
+
+        with pytest.raises(ProviderError):
+            map_fundamentals("EURUSD", None)
+
+    def test_adapter_fetch_fundamentals_delegates(self):
+        adapter = _make_adapter()
+
+        class FundTerminal(FakeMT5Terminal):
+            def symbol_info(self, symbol):
+                return _symbol_info(name=symbol, path="Forex\\EURUSD")
+
+            def symbol_info_tick(self, symbol):
+                return SimpleNamespace(time=1717171200, last=1.105)
+
+            def futures_calc_modes(self):
+                return frozenset({33})
+
+        adapter._terminal = FundTerminal()
+        f = adapter.fetch_fundamentals("EURUSD")
+        assert f.symbol == "EURUSD"
+        assert f.latest_price == 1.105
+
+    def test_adapter_fetch_fundamentals_unknown_symbol_raises(self):
+        adapter = _make_adapter()
+
+        class NoInfoTerminal(FakeMT5Terminal):
+            def symbol_info(self, symbol):
+                return None
+
+        adapter._terminal = NoInfoTerminal()
+        with pytest.raises(ProviderError, match="Unknown MT5 symbol"):
+            adapter.fetch_fundamentals("NOPE")
+
+
+class TestLifecycle:
+    """with MT5Adapter(): connects and disconnects (design doc sec 23)."""
+
+    def test_context_manager_connects_and_disconnects(self, monkeypatch):
+        adapter = MT5Adapter(config=Config(cache_enabled=False))
+        events: list[str] = []
+        monkeypatch.setattr(adapter._terminal, "initialize", lambda: events.append("connect"))
+        monkeypatch.setattr(adapter._terminal, "shutdown", lambda: events.append("disconnect"))
+
+        with adapter:
+            assert events == ["connect"]
+            assert adapter._terminal.connected is False  # no real terminal
+
+        assert events == ["connect", "disconnect"]
+
+    def test_close_alias_disconnects(self, monkeypatch):
+        adapter = MT5Adapter(config=Config(cache_enabled=False))
+        events: list[str] = []
+        monkeypatch.setattr(adapter._terminal, "shutdown", lambda: events.append("disconnect"))
+        adapter.close()
+        assert events == ["disconnect"]
 
 
 def _demo() -> None:

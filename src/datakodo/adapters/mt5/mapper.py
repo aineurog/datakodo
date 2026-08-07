@@ -15,6 +15,7 @@ from datakodo.core.instruments import (
     FutureExtension,
     Instrument,
 )
+from datakodo.core.schemas import Fundamentals
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,11 @@ def map_ohlcv(raw, volume: str = "tick_volume", offset_seconds: int = 0) -> pd.D
 
 
 # --- instrument classification (spot vs futures) ------------------------------
-
-
 def map_instrument(
     symbol: str,
     info,
     futures_modes: frozenset[int] = frozenset(),
+    forex_modes: frozenset[int] = frozenset((0, 5)),
     market_type: str = "",
 ) -> Instrument:
     """Classify an MT5 ``SymbolInfo`` tuple into a canonical ``Instrument``.
@@ -82,8 +82,10 @@ def map_instrument(
     broker prices the instrument (forex, futures, CFD, ...) and ``path``
     mirrors the Market Watch tree (``Forex\\EURUSD``, ``Futures\\...``).
     ``futures_modes`` holds the package's ``SYMBOL_CALC_MODE_*`` integers
-    that denote futures contracts (values differ across builds, so they are
-    resolved from the live module — see ``MT5Terminal.futures_calc_modes``).
+    that denote futures contracts and ``forex_modes`` the ones that denote
+    spot forex pairs (values differ across builds, so they are resolved from
+    the live module — see ``MT5Terminal.futures_calc_modes`` and
+    ``MT5Terminal.forex_calc_modes``).
 
     ``market_type`` is an optional user hint (``"spot"``/``"futures"``).
     When given it is validated against the detected classification: a
@@ -114,7 +116,7 @@ def map_instrument(
             asset_class=AssetClass.METAL,
             instrument_type=InstrumentType.SPOT,
         )
-    elif calc_mode in _FOREX_MODES or path.startswith("forex"):
+    elif calc_mode in forex_modes or path.startswith("forex"):
         instrument = _as_forex(symbol, info, exchange, currency)
     elif "crypto" in path or "coin" in path:
         instrument = Instrument(
@@ -177,12 +179,6 @@ def map_instrument(
     return instrument
 
 
-# Symbol calc modes that denote spot forex pairs (values stable across
-# builds: FOREX=0, FOREX_NO_LEVERAGE=5). Futures modes come from the live
-# module because their numeric values changed between package versions.
-_FOREX_MODES = frozenset((0, 5))
-
-
 def _as_futures(symbol: str, info, exchange: str, currency: str) -> Instrument:
     """Build a FUTURE Instrument from a SymbolInfo tuple."""
     expiry = _format_expiry(getattr(info, "expiration_time", 0))
@@ -234,3 +230,49 @@ def _format_expiry(epoch: int | float) -> str:
     if not epoch:
         return ""
     return dt.datetime.fromtimestamp(epoch, tz=dt.UTC).date().isoformat()
+
+
+# --- fundamentals ------------------------------------------------------------
+
+
+def map_fundamentals(
+    symbol: str,
+    info,
+    tick=None,
+    futures_modes: frozenset[int] = frozenset(),
+    forex_modes: frozenset[int] = frozenset((0, 5)),
+) -> Fundamentals:
+    """Build canonical ``Fundamentals`` from ``symbol_info`` (+ ``tick``).
+
+    MT5 exposes reference data through ``SymbolInfo`` (currencies, description,
+    contract sizing) and live prices through the latest ``Tick``. Classification
+    is delegated to ``map_instrument`` so the asset class / instrument type stay
+    consistent with ``MT5Adapter.instrument()``. Price/volume fields are best
+    effort: ``latest_price`` comes from the tick, and 24h oscillators are left
+    ``None`` since MT5 lacks an OHLCV-24h wholesale endpoint.
+    """
+    if info is None:
+        raise ProviderError(f"No MT5 symbol info for {symbol!r}.")
+    inst = map_instrument(symbol, info, futures_modes=futures_modes, forex_modes=forex_modes)
+    tick = tick or {}
+    latest = getattr(tick, "last", None)
+    if latest is None:
+        latest = getattr(tick, "bid", None)
+    if latest is None:
+        latest = getattr(info, "bid", None)
+    return Fundamentals(
+        symbol=symbol,
+        asset_class=inst.asset_class,
+        instrument_type=inst.instrument_type,
+        currency=inst.currency,
+        exchange=inst.exchange,
+        latest_price=(float(latest) if latest is not None else None),
+        timestamp=_epoch_to_utc(getattr(tick, "time", None)),
+    )
+
+
+def _epoch_to_utc(epoch) -> dt.datetime | None:
+    """Return a UTC-aware datetime for a unix seconds value (None-safe)."""
+    if not epoch:
+        return None
+    return dt.datetime.fromtimestamp(epoch, tz=dt.UTC)
