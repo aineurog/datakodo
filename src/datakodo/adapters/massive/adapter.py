@@ -1,20 +1,24 @@
-"""Polygon adapter — implements the AdapterInterface for Polygon.io."""
+"""Massive adapter — implements the AdapterInterface for Massive.com.
+
+Massive (formerly Polygon.io) rebranded on 2025-10-30; the API base moved from
+``api.polygon.io`` to ``api.massive.com``.  Existing API keys keep working.
+"""
 
 import logging
 from datetime import datetime
 
 import pandas as pd
 
-from datakodo.adapters.polygon.mapper import map_ohlcv, map_trades
-from datakodo.adapters.polygon.rest import PolygonREST
-from datakodo.adapters.polygon.ws import PolygonWS
+from datakodo.adapters.massive.mapper import map_ohlcv, map_trades
+from datakodo.adapters.massive.rest import MassiveREST
+from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.interfaces import AdapterInterface
 
 logger = logging.getLogger(__name__)
 
 
-class PolygonAdapter(AdapterInterface):
-    """Polygon.io adapter — equities, forex, and crypto.
+class MassiveAdapter(AdapterInterface):
+    """Massive.com adapter — equities, forex, crypto, options, indices, futures.
 
     Capabilities: OHLCV, ticks (historical + streaming), reference/fundamentals.
     Strong for reference data.
@@ -28,8 +32,8 @@ class PolygonAdapter(AdapterInterface):
     supports_fundamentals = True
 
     def __init__(self, api_key: str = "") -> None:
-        self._rest = PolygonREST(api_key)
-        self._ws = PolygonWS(api_key)
+        self._rest = MassiveREST(api_key)
+        self._ws = MassiveWS(api_key)
 
     # -- historical (sync) --
 

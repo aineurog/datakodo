@@ -1,4 +1,4 @@
-"""Polygon raw response → canonical schema normalization.
+"""Massive raw response → canonical schema normalization.
 
 All normalization uses vectorized operations via pandas/polars.
 """
@@ -9,9 +9,9 @@ from datakodo.core.schemas import Trade
 
 
 def map_ohlcv(raw: list) -> pd.DataFrame:
-    """Convert raw Polygon aggregates into a DataFrame of canonical OHLCV rows.
+    """Convert raw Massive aggregates into a DataFrame of canonical OHLCV rows.
 
-    Polygon agg format:
+    Massive agg format:
         {
           "t": unix_ms, "o": open, "h": high, "l": low, "c": close,
           "v": volume, "vw": vwap, "n": trades
@@ -40,7 +40,7 @@ def map_ohlcv(raw: list) -> pd.DataFrame:
 
 
 def map_trades(raw: dict) -> Trade:
-    """Convert a raw Polygon trade message into a canonical Trade."""
+    """Convert a raw Massive trade message into a canonical Trade."""
     conditions = raw.get("c", [])
     return Trade(
         timestamp=pd.Timestamp(raw["t"], unit="ms", tz="UTC"),

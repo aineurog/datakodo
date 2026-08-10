@@ -40,6 +40,7 @@ Install DataKodo with support for your provider:
 
 ```bash
 pip install datakodo[binance]   # Binance (spot + USD-M futures)
+pip install datakodo[massive]   # Massive.com — stocks, options, futures, forex, crypto, indices
 pip install datakodo[mt5]       # MetaTrader 5 (Windows only)
 ```
 
@@ -83,12 +84,15 @@ symbol.
 | --- | --- | --- |
 | Binance | Spot, USD-M perpetual futures | Implemented |
 | MetaTrader 5 | Forex, CFDs, metals, crypto, futures (where listed) | Implemented |
+| Massive | Stocks, options, futures, forex, crypto, indices | Scaffolding |
 | Alpaca, Bybit, and others | — | Planned |
 
 ## Documentation
 
 - [Binance adapter](docs/binance.md) — installation, configuration, and examples.
 - [MT5 adapter](docs/mt5.md) — installation, configuration, and examples.
+- [Massive adapter](docs/massive.md) — Massive.com REST + WebSocket API reference.
+- [Massive implementation plan](docs/massive-implementation-plan.md) — how the Massive adapter maps onto the common interface.
 - [Design document](docs/design-document.md) — architecture and design decisions.
 
 ## License

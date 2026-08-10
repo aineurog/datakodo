@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symbol not found, and other provider mapped errors.
 - Config system via pydantic-settings with .env support.
 - Configurable output format: pandas, polars, arrow, numpy.
-- Adapter scaffolding for Binance, Alpaca, Polygon, MT5, and IBKR.
+- Adapter scaffolding for Binance, Alpaca, Massive, MT5, and IBKR.
 - Each adapter subpackage includes rest, websocket, and mapper modules.
 - Token bucket rate limiter per provider instance.
 - Timeframe mapping from canonical enums to provider specific strings.
