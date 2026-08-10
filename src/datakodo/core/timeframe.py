@@ -49,6 +49,20 @@ IBKR_MAP: dict[Timeframe, str] = {
     Timeframe.MN1: "1 month",
 }
 
+# Canonical -> Massive (multiplier, timespan). Massive aggregates are addressed
+# by ``multiplier`` + ``timespan`` ({1,5,15,...} x {minute,hour,day,...}).
+MASSIVE_TIMESPANS: dict[Timeframe, tuple[int, str]] = {
+    Timeframe.M1: (1, "minute"),
+    Timeframe.M5: (5, "minute"),
+    Timeframe.M15: (15, "minute"),
+    Timeframe.M30: (30, "minute"),
+    Timeframe.H1: (1, "hour"),
+    Timeframe.H4: (4, "hour"),
+    Timeframe.D1: (1, "day"),
+    Timeframe.W1: (1, "week"),
+    Timeframe.MN1: (1, "month"),
+}
+
 # Duration of one candle of each canonical timeframe. Months are approximated
 # as 30 days (a documented, deterministic choice used for pagination sizing).
 _TIMEFRAME_DELTA: dict[Timeframe, timedelta] = {

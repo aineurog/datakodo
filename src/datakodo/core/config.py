@@ -78,3 +78,15 @@ class Config(BaseSettings):
     based terminal, so this is a conservative throttle on data requests."""
     mt5_rate_limit_burst: int = 10
     """MT5 token-bucket burst capacity."""
+
+    # --- massive adapter (design doc sec 13/14: API-key auth) ---
+    massive_api_key: str = ""
+    """Massive.com API key. Unlike Binance public data, Massive market data
+    requires a key. Read from ``MASSIVE_API_KEY`` or ``.env``."""
+    massive_timeout: float = 10.0
+    """Per-request timeout in seconds for Massive REST and WebSockets."""
+    massive_rate_limit_rate: float = 5.0
+    """Massive token-bucket refill rate (tokens/sec). Massive is quota-based;
+    a conservative throttle avoids tripping the free-tier limit."""
+    massive_rate_limit_burst: int = 50
+    """Massive token-bucket burst capacity."""
