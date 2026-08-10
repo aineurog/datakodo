@@ -42,7 +42,7 @@ datakodo/
 │       │   │   ├── rest.py
 │       │   │   ├── ws.py
 │       │   │   └── mapper.py
-│       │   ├── polygon/
+│       │   ├── massive/
 │       │   │   ├── __init__.py
 │       │   │   ├── adapter.py
 │       │   │   ├── rest.py
@@ -95,7 +95,7 @@ datakodo/
 │   │   ├── contract_tests.py        # shared contract suite every adapter must pass (sec 26)
 │   │   ├── test_binance.py
 │   │   ├── test_alpaca.py
-│   │   ├── test_polygon.py
+│   │   ├── test_massive.py
 │   │   ├── test_mt5.py
 │   │   └── test_ibkr.py
 │   ├── ops/
@@ -107,7 +107,8 @@ datakodo/
 │   └── fixtures/                    # golden recorded API responses per provider (sec 26)
 │
 ├── docs/
-│   ├── usage.md
+│   ├── binance.md                   # per-provider usage: Binance (sec 29)
+│   ├── mt5.md                       # per-provider usage: MetaTrader 5 (sec 29)
 │   └── adapters/                    # per-provider: capabilities, cost tier, limits (sec 29)
 │
 └── .github/
@@ -124,7 +125,7 @@ datakodo/
 - **`core/interfaces.py`** holds both the `AdapterInterface` abstract base class and the `StorageBackend` abstract class. Capability checking (`check_capability()` that raises `NotSupportedError`/`PaidTierRequiredError`) is centralized here so adapters don't scatter these checks.
 - **`storage/cache.py`** extracts caching logic from sec 17 into its own module: `build_cache_key(provider, symbol, timeframe, date_range)`, `is_closed`/`is_final` flag handling, invalidation rules, and a `CacheEntry` model with metadata.
 - **`ops/corporate_actions.py`** is separate from `validation.py` since splits/dividends handling is non-trivial adjustment logic, not just a sanity check. Contains `adjust_ohlcv_for_splits(df, split_history)` and `adjust_ohlcv_for_dividends(df, dividend_history)`.
-- **Each adapter is a subpackage**, not a single file. The design doc names five Phase 1 providers (Binance, Alpaca, Polygon, MT5, IBKR — sec 24), and each needs REST, websocket, and mapping logic. A single file per adapter would collapse under that weight.
+- **Each adapter is a subpackage**, not a single file. The design doc names five Phase 1 providers (Binance, Alpaca, Massive, MT5, IBKR — sec 24), and each needs REST, websocket, and mapping logic. A single file per adapter would collapse under that weight.
 - **Adapter internal template**: `adapter.py` (implements the interface), `rest.py` (HTTP), `ws.py` (websocket), `mapper.py` (normalization). MT5 has `terminal.py` instead of `rest.py`/`ws.py` because it uses a COM based blocking terminal connection. IBKR uses `client.py` for the TWS callback client.
 - **`streaming/`** gives async streaming its own home — websocket reconnect patterns, snapshot+delta order book maintenance. Keeps adapter websocket code thin.
 - **`ops/`** groups resample, pagination, data quality validation, and corporate actions adjustments. These are cross cutting utilities that serve all adapters but are not part of the core contract.

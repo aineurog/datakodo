@@ -62,3 +62,31 @@ class Config(BaseSettings):
     """Binance token-bucket refill rate (tokens/sec); 100/s matches spot."""
     binance_rate_limit_burst: int = 1000
     """Binance token-bucket burst capacity."""
+
+    # --- mt5 adapter (design doc sec 13/14: terminal-based auth) ---
+    mt5_login: int | None = None
+    """MT5 terminal account login (int). None falls back to the default terminal."""
+    mt5_password: str = ""
+    """MT5 terminal account password."""
+    mt5_server: str = ""
+    """MT5 broker server name (e.g. 'FusionMarkets-Demo')."""
+    mt5_terminal_path: str = r"C:\Program Files\MetaTrader 5"
+    """Path to the MT5 terminal install folder (or terminal64.exe directly).
+    Defaults to the standard Windows install location."""
+    mt5_rate_limit_rate: float = 5.0
+    """MT5 token-bucket refill rate (tokens/sec). MT5 is a local, non-weight
+    based terminal, so this is a conservative throttle on data requests."""
+    mt5_rate_limit_burst: int = 10
+    """MT5 token-bucket burst capacity."""
+
+    # --- massive adapter (design doc sec 13/14: API-key auth) ---
+    massive_api_key: str = ""
+    """Massive.com API key. Unlike Binance public data, Massive market data
+    requires a key. Read from ``MASSIVE_API_KEY`` or ``.env``."""
+    massive_timeout: float = 10.0
+    """Per-request timeout in seconds for Massive REST and WebSockets."""
+    massive_rate_limit_rate: float = 5.0
+    """Massive token-bucket refill rate (tokens/sec). Massive is quota-based;
+    a conservative throttle avoids tripping the free-tier limit."""
+    massive_rate_limit_burst: int = 50
+    """Massive token-bucket burst capacity."""

@@ -53,8 +53,8 @@ binance = [
 alpaca = [
     "alpaca-py>=0.20",
 ]
-polygon = [
-    "polygon-api-client>=1.0",
+massive = [
+    "massive>=1.0",
 ]
 mt5 = [
     "MetaTrader5",
@@ -72,7 +72,7 @@ dev = [
 all = [
     "python-binance>=1.0",
     "alpaca-py>=0.20",
-    "polygon-api-client>=1.0",
+    "massive>=1.0",
     "MetaTrader5; sys_platform == 'win32'",
     "ib-insync>=0.9",
 ]
@@ -103,7 +103,7 @@ module = [
     "binance.*",
     "python_binance.*",
     "alpaca.*",
-    "polygon.*",
+    "massive.*",
     "numpy",
     "pandas",
     "pyarrow",
