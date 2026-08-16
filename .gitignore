@@ -7,6 +7,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-datakodo_cache/
 demo_output/
 live_output/
+
+*.claude
+*.commandcode

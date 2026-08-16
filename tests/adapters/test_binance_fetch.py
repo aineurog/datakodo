@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
-from datakodo.core.config import Config
+from datakodo.adapters.binance.config import BinanceConfig
 
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"
@@ -25,29 +25,29 @@ OUT_DIR.mkdir(exist_ok=True)
 
 
 def main() -> None:
-    # 1. Config from env / .env — print what is in use.
-    config = Config(_env_file=".env")
-    print(f"Config binance_market_type={config.binance_market_type} tld={config.binance_tld}")
+    # 1. Provider config from env / .env — print what is in use.
+    binance_config = BinanceConfig(_env_file=".env")
+    print(f"Binance market_type={binance_config.market_type} tld={binance_config.tld}")
 
     # 2. Per-run overrides — config is overridable per call.
-    config = config.model_copy(
+    binance_config = binance_config.model_copy(
         update={
-            "binance_market_type": "spot",
-            "binance_timeout": 12.0,
-            "binance_rate_limit_rate": 80.0,
+            "market_type": "spot",
+            "timeout": 12.0,
+            "rate_limit_rate": 80.0,
         }
     )
     print(
-        f"Using market_type={config.binance_market_type} "
-        f"timeout={config.binance_timeout} rate={config.binance_rate_limit_rate}"
+        f"Using market_type={binance_config.market_type} "
+        f"timeout={binance_config.timeout} rate={binance_config.rate_limit_rate}"
     )
 
-    adapter = BinanceAdapter(config=config)
+    adapter = BinanceAdapter(binance_config=binance_config)
 
     # 3. Fetch different data: spot + USD-M futures, save each to CSV.
     for market in MARKETS:
         print(f"Fetching {market} OHLCV for {SYMBOL} {TIMEFRAME} ...")
-        df = adapter.fetch_ohlcv(SYMBOL, TIMEFRAME, START, END, market_type=market, persist=False)
+        df = adapter.fetch_ohlcv(SYMBOL, TIMEFRAME, START, END, market_type=market)
         print(f"  Returned {len(df)} candles x {list(df.columns)}")
 
         path = OUT_DIR / f"ohlcv_{TIMEFRAME}_{market}.csv"

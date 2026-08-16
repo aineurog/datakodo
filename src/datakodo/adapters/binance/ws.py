@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 
 from binance import AsyncClient, BinanceSocketManager
 
-from datakodo.core.config import Config
+from datakodo.adapters.binance.config import BinanceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -18,25 +18,15 @@ logger = logging.getLogger(__name__)
 class BinanceWS:
     """Async WebSocket client for Binance real-time streams."""
 
-    def __init__(
-        self, api_key: str = "", api_secret: str = "", config: Config | None = None
-    ) -> None:
-        cfg = config or Config()
-        if api_key:
-            cfg = cfg.model_copy(
-                update={
-                    "binance_api_key": api_key,
-                    "binance_api_secret": api_secret,
-                }
-            )
-        self._config = cfg
+    def __init__(self, binance_config: BinanceConfig | None = None) -> None:
+        self._binance = binance_config or BinanceConfig()
 
     async def _client(self) -> AsyncClient:
         return await AsyncClient.create(
-            self._config.binance_api_key,
-            self._config.binance_api_secret,
-            tld=self._config.binance_tld,
-            testnet=self._config.binance_testnet,
+            self._binance.api_key,
+            self._binance.api_secret,
+            tld=self._binance.tld,
+            testnet=self._binance.testnet,
         )
 
     async def _messages(

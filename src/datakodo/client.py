@@ -2,28 +2,76 @@
 
 A thin, provider-agnostic front door. The Client only knows the provider
 name and forwards to the adapter instance, so core stays independent of any
-specific exchange. New providers register themselves in the registry; adding
-one never touches core.
+specific exchange. Adapters register themselves via Python entry points
+under the ``datakodo.adapters`` group (with the built-in adapters available
+directly); adding a provider never touches core.
 """
 
-from datakodo.adapters.binance import BinanceAdapter
+import logging
+from importlib import import_module
+from importlib.metadata import entry_points
+
+logger = logging.getLogger(__name__)
+
+# Built-in adapters always available even when the package is not installed
+# (e.g. running from a source checkout). Entry points may register more.
+_BUILTINS: dict[str, str] = {
+    "binance": "datakodo.adapters.binance:BinanceAdapter",
+}
+
+_ENTRY_POINT_GROUP = "datakodo.adapters"
+
+
+def _iter_entry_points():
+    """Yield entry points from the ``datakodo.adapters`` group, robustly."""
+    try:
+        eps = entry_points()
+    except TypeError:  # pragma: no cover - very old importlib.metadata
+        return []
+    if hasattr(eps, "select"):
+        return eps.select(group=_ENTRY_POINT_GROUP)
+    return eps.get(_ENTRY_POINT_GROUP, [])
+
+
+def _load_registry() -> dict[str, type]:
+    """Build the adapter registry: built-ins plus any installed entry points.
+
+    A provider whose optional dependency is not installed is skipped rather
+    than breaking the whole registry, so a missing extra never prevents the
+    other providers from loading.
+    """
+    registry: dict[str, type] = {}
+    for name, spec in _BUILTINS.items():
+        try:
+            module_name, _, attr = spec.partition(":")
+            registry[name] = getattr(import_module(module_name), attr)
+        except Exception as exc:  # noqa: BLE001 - optional dependency missing
+            logger.debug("Skipping built-in adapter %r: %s", name, exc)
+    for ep in _iter_entry_points():
+        try:
+            registry[ep.name] = ep.load()
+        except Exception as exc:  # noqa: BLE001 - optional dependency missing
+            logger.debug("Skipping entry-point adapter %r: %s", ep.name, exc)
+    return registry
 
 
 class Client:
     """Entry point for all data requests.
 
-    Instantiate with a provider name and optional config overrides, then call
-    the same methods you would on the adapter directly:
+    Instantiate with a provider name, then call the same methods you would on
+    the adapter directly. Provider credentials come from the environment
+    (``BINANCE_API_KEY`` etc.) or as keyword arguments forwarded to the adapter:
 
-        client = Client("binance", config=config)
+        client = Client("binance")
         df = client.fetch_ohlcv("BTCUSDT", "1h", start, end)
     """
 
     def __init__(self, provider: str, config=None, **kwargs) -> None:
         self._provider = provider
-        cls = _REGISTRY.get(provider)
+        registry = _load_registry()
+        cls = registry.get(provider)
         if cls is None:
-            raise ValueError(f"Unknown provider {provider!r}. Available: {sorted(_REGISTRY)}.")
+            raise ValueError(f"Unknown provider {provider!r}. Available: {sorted(registry)}.")
         self._adapter = cls(config=config, **kwargs)
 
     @property
@@ -31,12 +79,17 @@ class Client:
         """The underlying provider adapter (for provider-specific calls)."""
         return self._adapter
 
+    @staticmethod
+    def available_providers() -> list[str]:
+        """Return the sorted list of provider names that can be instantiated."""
+        return sorted(_load_registry())
+
     def __repr__(self) -> str:
         return f"Client(provider={self._provider!r})"
 
     # --- passthrough to the adapter ---
 
-    def instrument(self, symbol, market_type="spot"):
+    def instrument(self, symbol, market_type=""):
         return self._adapter.instrument(symbol, market_type=market_type)
 
     def fetch_ohlcv(self, symbol, timeframe, start, end, **kwargs):
@@ -54,6 +107,9 @@ class Client:
     def fetch_fundamentals(self, symbol, **kwargs):
         return self._adapter.fetch_fundamentals(symbol, **kwargs)
 
+    def search_instruments(self, query="", **kwargs):
+        return self._adapter.search_instruments(query, **kwargs)
+
     # --- lifecycle (design doc sec 23) ---
 
     def __enter__(self):
@@ -68,9 +124,7 @@ class Client:
         return getattr(self._adapter, name)
 
 
-_REGISTRY: dict[str, type] = {
-    "binance": BinanceAdapter,
-}
+_REGISTRY: dict[str, type] = {}
 
 
 def register_provider(name: str, adapter_cls: type) -> None:

@@ -15,7 +15,7 @@ import pytest
 from datakodo.adapters.binance.adapter import BinanceAdapter
 from datakodo.core.config import Config
 
-CANONICAL_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume", "session"]
+CANONICAL_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume", "is_closed"]
 
 # Canonical raw kline shape: [open_time, open, high, low, close, volume,
 #  close_time, quote_volume, trades, taker_buy_base, taker_buy_quote, ignore]
@@ -36,13 +36,12 @@ _KLINE = [
 
 
 @pytest.fixture(autouse=True)
-def _clear_datakodo_env(monkeypatch):
-    """Make tests hermetic: drop real DATAKODO_* env vars."""
-    for key in list(Config.model_fields) + [
-        "DATAKODO_BINANCE_API_KEY",
-        "DATAKODO_BINANCE_API_SECRET",
-    ]:
+def _clear_env(monkeypatch):
+    """Make tests hermetic: drop real BINANCE_* / DATAKODO_* env vars."""
+    for key in list(Config.model_fields):
         monkeypatch.delenv("DATAKODO_" + key.upper(), raising=False)
+    monkeypatch.delenv("BINANCE_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
 
 
 def test_binance_fetch_ohlcv_matches_canonical_contract():
@@ -52,7 +51,7 @@ def test_binance_fetch_ohlcv_matches_canonical_contract():
         )
     assert list(df.columns) == CANONICAL_COLUMNS
     assert df["timestamp"].dt.tz is not None
-    assert (df["session"] == "n/a").all()
+    assert df["is_closed"].all()
 
 
 if __name__ == "__main__":

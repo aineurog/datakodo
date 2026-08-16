@@ -21,9 +21,9 @@ datakodo/
 │       │   ├── schemas.py           # canonical models: OHLCV, Trade, OrderBook,
 │       │   │                         #   Instrument (sec 3, 4, 20)
 │       │   ├── instruments.py       # Instrument base + asset-class extensions (sec 4)
-│       │   ├── interfaces.py        # AdapterInterface + StorageBackend + capability
-│       │   │                         #   checks (check_capability, NotSupportedError,
-│       │   │                         #   PaidTierRequiredError) (sec 2, 17)
+│       │   ├── interfaces.py        # AdapterInterface + capability checks
+│       │   │                         #   (check_capability, NotSupportedError,
+│       │   │                         #   PaidTierRequiredError) (sec 2)
 │       │   ├── exceptions.py        # exception hierarchy (sec 15)
 │       │   ├── enums.py             # AssetClass, InstrumentType, Timeframe, Session
 │       │   └── timeframe.py         # canonical <-> provider timeframe mapping (sec 19)
@@ -33,6 +33,7 @@ datakodo/
 │       │   ├── binance/
 │       │   │   ├── __init__.py
 │       │   │   ├── adapter.py       # implements abstract adapter interface
+│       │   │   ├── config.py        # provider-specific settings (BinanceConfig)
 │       │   │   ├── rest.py          # HTTP client
 │       │   │   ├── ws.py            # websocket streaming
 │       │   │   └── mapper.py        # raw provider response -> canonical schema
@@ -67,25 +68,20 @@ datakodo/
 │       │
 │       ├── ops/
 │       │   ├── __init__.py
+│       │   ├── output.py            # pandas/polars/arrow output conversion (sec 13)
 │       │   ├── resample.py          # timeframe resampling (sec 7)
 │       │   ├── pagination.py        # auto-paginate & stitch (sec 11)
 │       │   ├── validation.py        # data quality checks: gaps, duplicates,
-│       │   │                         #   monotonic timestamps (sec 18)
+│       │   │                         #   monotonic timestamps, is_closed (sec 18)
 │       │   └── corporate_actions.py # split/dividend adjustment logic (sec 18)
 │       │
-│       ├── ratelimit/
-│       │   ├── __init__.py
-│       │   └── limiter.py           # token bucket per provider instance (sec 16)
-│       │
-│       └── storage/
+│       └── ratelimit/
 │           ├── __init__.py
-│           ├── base.py              # StorageBackend abstract interface (sec 17)
-│           ├── cache.py             # cache key logic, is_closed flag, invalidation
-│           │                         #   rules, CacheEntry model (sec 17)
-│           └── parquet.py           # Parquet backend (sec 17)
+│           └── limiter.py           # token bucket per provider instance (sec 16)
 │
 ├── tests/
 │   ├── conftest.py
+│   ├── test_library_imports.py      # imports every public module (sec 26)
 │   ├── core/
 │   │   ├── test_schemas.py          # schema validation as first-class testing (sec 26)
 │   │   ├── test_instruments.py
@@ -93,12 +89,17 @@ datakodo/
 │   │   └── test_timeframe.py
 │   ├── adapters/
 │   │   ├── contract_tests.py        # shared contract suite every adapter must pass (sec 26)
-│   │   ├── test_binance.py
+│   │   ├── test_binance_components.py
+│   │   ├── test_binance_config.py
+│   │   ├── test_binance_contract.py
+│   │   ├── test_binance_fetch.py    # live fetch script (manual run)
+│   │   ├── test_binance_live.py     # live WebSocket/REST check (manual run)
 │   │   ├── test_alpaca.py
 │   │   ├── test_polygon.py
 │   │   ├── test_mt5.py
 │   │   └── test_ibkr.py
 │   ├── ops/
+│   │   ├── test_output.py
 │   │   ├── test_resample.py
 │   │   ├── test_pagination.py
 │   │   ├── test_validation.py
@@ -120,9 +121,9 @@ datakodo/
 
 - **`src/` layout** avoids accidental imports of the repo root instead of the installed package.
 - **`py.typed`** is an empty marker file per PEP 561 that tells mypy and downstream type checkers this package ships inline type annotations.
-- **`config.py` lives in `core/`** because it defines settings for schemas, storage, rate limiting, and output format — all owned by core. The top level `__init__.py` re-exports `Config` so `from datakodo.config import Config` still works.
-- **`core/interfaces.py`** holds both the `AdapterInterface` abstract base class and the `StorageBackend` abstract class. Capability checking (`check_capability()` that raises `NotSupportedError`/`PaidTierRequiredError`) is centralized here so adapters don't scatter these checks.
-- **`storage/cache.py`** extracts caching logic from sec 17 into its own module: `build_cache_key(provider, symbol, timeframe, date_range)`, `is_closed`/`is_final` flag handling, invalidation rules, and a `CacheEntry` model with metadata.
+- **`config.py` lives in `core/`** and holds only cross-cutting settings (output format, retries, resampling flag, log level). Provider-specific settings live on each adapter's own config model (e.g. `BinanceConfig`), so the global config never grows a field per provider. The top level `__init__.py` re-exports `Config` so `from datakodo.config import Config` still works.
+- **`core/interfaces.py`** holds the `AdapterInterface` abstract base class plus the shared plumbing adapters inherit: `symbol_of()`, the default `fetch_ohlcv_batch()`, `search_instruments()`, lifecycle methods, and capability checking (`check_capability()` that raises `NotSupportedError`/`PaidTierRequiredError`).
+- **`ops/output.py`** is the single conversion point from the internal frame to the user-facing format (`pandas` default, `polars`, or `arrow`), so adapters never hand back raw provider data.
 - **`ops/corporate_actions.py`** is separate from `validation.py` since splits/dividends handling is non-trivial adjustment logic, not just a sanity check. Contains `adjust_ohlcv_for_splits(df, split_history)` and `adjust_ohlcv_for_dividends(df, dividend_history)`.
 - **Each adapter is a subpackage**, not a single file. The design doc names five Phase 1 providers (Binance, Alpaca, Polygon, MT5, IBKR — sec 24), and each needs REST, websocket, and mapping logic. A single file per adapter would collapse under that weight.
 - **Adapter internal template**: `adapter.py` (implements the interface), `rest.py` (HTTP), `ws.py` (websocket), `mapper.py` (normalization). MT5 has `terminal.py` instead of `rest.py`/`ws.py` because it uses a COM based blocking terminal connection. IBKR uses `client.py` for the TWS callback client.

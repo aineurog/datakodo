@@ -8,7 +8,8 @@ import pandas as pd
 from datakodo.adapters.ibkr.client import IBKRClient
 from datakodo.adapters.ibkr.mapper import map_ohlcv, map_trades
 from datakodo.adapters.ibkr.ws import IBKRWS
-from datakodo.core.interfaces import AdapterInterface
+from datakodo.core.instruments import Instrument
+from datakodo.core.interfaces import AdapterInterface, symbol_of
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +50,27 @@ class IBKRAdapter(AdapterInterface):
     # -- historical (sync) --
 
     def fetch_ohlcv(
-        self, symbol: str, timeframe: str, start: datetime, end: datetime
+        self,
+        symbol: str | Instrument,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        *,
+        columns="basic",
+        **kwargs,
     ) -> pd.DataFrame:
+        symbol = symbol_of(symbol)
         raw = self._client.req_historical_data(symbol, timeframe, start, end)
         return map_ohlcv(raw)
 
     # -- streaming (async) --
 
-    async def stream_trades(self, symbol: str):
+    async def stream_trades(self, symbol: str | Instrument):
+        symbol = symbol_of(symbol)
         async for raw in self._ws.trade_stream(symbol):
             yield map_trades(raw)
 
-    async def stream_orderbook(self, symbol: str):
+    async def stream_orderbook(self, symbol: str | Instrument):
+        symbol = symbol_of(symbol)
         async for raw in self._ws.orderbook_stream(symbol):
             yield raw

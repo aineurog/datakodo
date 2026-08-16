@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
-from datakodo.core.config import Config
+from datakodo.adapters.binance.config import BinanceConfig
 
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"
@@ -44,9 +44,9 @@ async def get_trades(adapter, market_type, count=3):
 
 def main():
     # 1. Configuration: build the adapter from the defaults (.env / env vars).
-    config = Config()
-    adapter = BinanceAdapter(config=config)
-    print(f"Config: market={config.binance_market_type} tld={config.binance_tld}")
+    binance_config = BinanceConfig()
+    adapter = BinanceAdapter(binance_config=binance_config)
+    print(f"Config: market={binance_config.market_type} tld={binance_config.tld}")
 
     # 2. Streamed trades over WebSocket: spot, then USD-M futures.
     print("Streaming spot trades ...")

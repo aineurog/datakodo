@@ -43,14 +43,9 @@ class TestToOutputFormat:
         assert out.num_rows == 2
         assert out.num_columns == 7
 
-    def test_numpy(self, ohlcv_df):
-        out = to_output_format(ohlcv_df, "numpy")
-        assert type(out).__name__ == "ndarray"
-        assert out.shape == (2, 7)
-
     def test_unsupported_format_raises(self, ohlcv_df):
         with pytest.raises(ValueError, match="Unsupported output format"):
             to_output_format(ohlcv_df, "csv")
 
     def test_supported_formats_listed(self):
-        assert SUPPORTED_OUTPUT_FORMATS == ("pandas", "polars", "arrow", "numpy")
+        assert SUPPORTED_OUTPUT_FORMATS == ("pandas", "polars", "arrow")

@@ -15,13 +15,6 @@ def sample_ohlcv_df():
             "low": [99.0, 100.0, 101.0, 102.0, 103.0],
             "close": [101.0, 102.0, 103.0, 104.0, 105.0],
             "volume": [1000.0, 1100.0, 1200.0, 1300.0, 1400.0],
+            "is_closed": [True] * 5,
         }
     )
-
-
-@pytest.fixture
-def sample_ohlcv_df_with_session(sample_ohlcv_df):
-    """Return an OHLCV DataFrame with a session column."""
-    df = sample_ohlcv_df.copy()
-    df["session"] = "n/a"
-    return df

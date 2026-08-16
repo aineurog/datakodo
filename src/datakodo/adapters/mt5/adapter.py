@@ -7,7 +7,8 @@ import pandas as pd
 
 from datakodo.adapters.mt5.mapper import map_ohlcv
 from datakodo.adapters.mt5.terminal import MT5Terminal
-from datakodo.core.interfaces import AdapterInterface
+from datakodo.core.instruments import Instrument
+from datakodo.core.interfaces import AdapterInterface, symbol_of
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ class MT5Adapter(AdapterInterface):
     supports_orderbook_snapshot = False
     supports_streaming_orderbook = False
     supports_streaming_ticks = False
+
+    concurrency_model = "serial"
 
     def __init__(self, terminal_path: str = "") -> None:
         self._terminal = MT5Terminal(terminal_path)
@@ -48,7 +51,15 @@ class MT5Adapter(AdapterInterface):
     # -- historical (sync) --
 
     def fetch_ohlcv(
-        self, symbol: str, timeframe: str, start: datetime, end: datetime
+        self,
+        symbol: str | Instrument,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        *,
+        columns="basic",
+        **kwargs,
     ) -> pd.DataFrame:
+        symbol = symbol_of(symbol)
         raw = self._terminal.copy_rates_range(symbol, timeframe, start, end)
         return map_ohlcv(raw)

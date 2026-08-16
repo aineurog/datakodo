@@ -1,14 +1,19 @@
 """Timeframe resampling — derive larger timeframes from smaller ones.
 
-One implementation serves all providers. Only upsampling (1m → 1h)
-is valid; downsampling is rejected.
+One implementation serves all providers. Only upsampling (1m → 1h) is valid;
+downsampling is rejected. Periods are calendar-anchored (pandas bins on the
+clock/calendar, not a fixed number of rows), and aggregation never merges
+across a gap in the source data (design doc sec 8).
 """
 
+import logging
 from collections.abc import Sequence
 
 import pandas as pd
 
 from datakodo.core.enums import Timeframe
+
+logger = logging.getLogger(__name__)
 
 _TIMEFRAME_MINUTES: dict[Timeframe, int] = {
     Timeframe.M1: 1,
@@ -27,7 +32,7 @@ def pick_source_timeframe(target: Timeframe, native: Sequence[Timeframe]) -> Tim
     """Return the largest native timeframe strictly smaller than ``target``.
 
     This is the finest source DataKodo can fetch to resample up to ``target``
-    when the provider does not offer ``target`` natively (design doc sec 7).
+    when the provider does not offer ``target`` natively (design doc sec 8).
 
     Raises:
         ValueError: If no native timeframe is smaller than ``target`` —
@@ -44,7 +49,7 @@ def pick_source_timeframe(target: Timeframe, native: Sequence[Timeframe]) -> Tim
 
 
 def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
-    """Resample an OHLCV DataFrame to a larger target timeframe.
+    """Resample an OHLCV frame to a larger target timeframe.
 
     Standard OHLCV aggregation rules:
     - open  = first
@@ -53,15 +58,18 @@ def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
     - close = last
     - volume = sum
 
-    Only upsampling is supported — the source timeframe must be smaller
-    than the target. A ValueError is raised for invalid requests.
+    Only upsampling is supported — the source timeframe must be smaller than
+    the target. Periods are calendar-anchored via pandas binning; bars whose
+    source period is missing candles (a gap) are dropped rather than silently
+    aggregated over the gap. Resampled bars are always fully closed.
 
     Args:
-        df: OHLCV DataFrame with a DatetimeIndex or a 'timestamp' column.
+        df: OHLCV frame with a DatetimeIndex or a 'timestamp' column.
         target_timeframe: The desired output Timeframe enum value.
 
     Returns:
-        A new DataFrame resampled to *target_timeframe*.
+        A new DataFrame resampled to *target_timeframe* with an ``is_closed``
+        column of all ``True``.
     """
     if df.empty:
         raise ValueError("Cannot resample an empty DataFrame.")
@@ -82,12 +90,13 @@ def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
 
     rule = _to_pandas_freq(target_timeframe)
 
-    # Temporarily use the timestamp as the index for resampling.
+    # Use the timestamp as the index for resampling.
     if resolved_index is not df.index:
         df = df.set_index(resolved_index.name)
+    df.index.name = "timestamp"
 
-    result = (
-        df.resample(rule)
+    agg = (
+        df.resample(rule, label="left", closed="left")
         .agg(
             {
                 "open": "first",
@@ -100,15 +109,50 @@ def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
         .dropna()
     )
 
+    # Gap awareness: a period is missing candles when it holds fewer source
+    # bars than expected. The first and last periods may legitimately be
+    # partial (the fetched range does not align to the period boundary), so
+    # they are exempt.
+    expected = _expected_bars(source_minutes, target_minutes)
+    if expected is not None:
+        counts = df.resample(rule, label="left", closed="left")["close"].size()
+        incomplete = counts[counts < expected]
+        if len(counts) > 2:
+            incomplete = incomplete.drop(counts.index[[0, -1]], errors="ignore")
+        if len(incomplete):
+            logger.warning(
+                "Dropped %d resampled bars that span gaps in the source data",
+                len(incomplete),
+            )
+            agg = agg.drop(index=incomplete.index, errors="ignore")
+
+    result = agg.copy()
+    result["is_closed"] = True
+
     if "session" in df.columns:
         # Session is not aggregatable; carry forward the most common label.
-        result["session"] = (
+        session = (
             df["session"]
-            .resample(rule)
+            .resample(rule, label="left", closed="left")
             .agg(lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.iloc[0])
         )
+        result["session"] = session.reindex(result.index)
 
     return result.reset_index()
+
+
+def _expected_bars(source_minutes: float, target_minutes: int) -> int | None:
+    """Return the number of source bars expected per target period, or None.
+
+    ``None`` when the source spacing cannot be resolved to a whole divisor of
+    the target (in which case gap-awareness is skipped rather than guessing).
+    """
+    if source_minutes <= 0:
+        return None
+    expected = target_minutes / source_minutes
+    if expected != round(expected):
+        return None
+    return int(round(expected))
 
 
 def _resolve_index(df: pd.DataFrame):
@@ -132,7 +176,12 @@ def _infer_source_minutes(index) -> float:
 
 
 def _to_pandas_freq(tf: Timeframe) -> str:
-    """Map a canonical Timeframe to a pandas frequency string."""
+    """Map a canonical Timeframe to a pandas frequency string.
+
+    Weekly bars anchor on Monday (``"W-MON"``) so the calendar boundary is
+    deterministic and documented across providers (design doc sec 8); monthly
+    bars anchor on calendar month end (``"ME"``).
+    """
     mapping = {
         Timeframe.M1: "1min",
         Timeframe.M5: "5min",
@@ -141,7 +190,7 @@ def _to_pandas_freq(tf: Timeframe) -> str:
         Timeframe.H1: "1h",
         Timeframe.H4: "4h",
         Timeframe.D1: "1D",
-        Timeframe.W1: "1W",
-        Timeframe.MN1: "1ME",
+        Timeframe.W1: "W-MON",
+        Timeframe.MN1: "ME",
     }
     return mapping[tf]

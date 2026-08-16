@@ -5,12 +5,15 @@ from datakodo.core.exceptions import (
     ConnectionError,
     DataLibError,
     DataNotAvailableError,
+    DataValidationError,
     InvalidTimeframeError,
     NotSupportedError,
     PaidTierRequiredError,
     ProviderError,
     RateLimitError,
+    RetriesExhaustedError,
     SymbolNotFoundError,
+    TimeoutError,
 )
 
 
@@ -22,9 +25,12 @@ class TestExceptionHierarchy:
             SymbolNotFoundError,
             InvalidTimeframeError,
             ConnectionError,
+            TimeoutError,
+            RetriesExhaustedError,
             DataNotAvailableError,
             NotSupportedError,
             PaidTierRequiredError,
+            DataValidationError,
             ProviderError,
         ]:
             assert issubclass(exc_cls, DataLibError)

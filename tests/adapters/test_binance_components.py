@@ -3,21 +3,20 @@
 Each test targets one component in isolation with mocked/offline data —
 no live API calls, no keys. Covers:
 
-  core.config.Config        binance_* settings, env override, .env
-  mapper.map_ohlcv          raw klines -> canonical OHLCV DataFrame
-  mapper.map_trades         raw trade msg -> canonical Trade
-  rest._to_millis           datetime -> epoch ms
-  rest._klines_weight       request weight per market/limit
-  rest._translate           BinanceAPIException -> DataKodo exception
-  rest.klines               endpoint routing (spot vs futures, mocked)
-  ws.BinanceWS              construction + config plumbing
-  adapter.instrument        spot vs perpetual Instrument
-  adapter capabilities      flags + check_capability
-  adapter.fetch_ohlcv       end-to-end with mocked REST
-  ops.pagination.paginate   chunking + stitching + dedupe
-  ops.validation.validate   quality checks (pass and fail)
-  storage.cache             build_cache_key / is_bar_closed / compute_expiry
-  storage.parquet           write / read / exists round-trip
+  binance.config           BinanceConfig defaults, env override
+  core.config.Config       cross-cutting settings (no per-provider fields)
+  mapper.map_ohlcv         raw klines -> canonical OHLCV DataFrame
+  mapper.map_trades        raw trade msg -> canonical Trade
+  rest._to_millis          datetime -> epoch ms
+  rest._klines_weight      request weight per market/limit
+  rest._translate          BinanceAPIException -> DataKodo exception
+  rest.klines              endpoint routing (spot vs futures, mocked)
+  ws.BinanceWS             construction + config plumbing
+  adapter.instrument       spot vs perpetual Instrument
+  adapter capabilities     flags + check_capability
+  adapter.fetch_ohlcv      end-to-end with mocked REST
+  ops.pagination.paginate  chunking + stitching + dedupe
+  ops.validation.validate  quality checks (pass and fail)
 
 Run:
     python -m pytest tests/adapters/test_binance_components.py -v
@@ -29,6 +28,7 @@ import pandas as pd
 import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
+from datakodo.adapters.binance.config import BinanceConfig
 from datakodo.adapters.binance.mapper import (
     map_fundamentals,
     map_ohlcv,
@@ -41,6 +41,7 @@ from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
+    DataValidationError,
     NotSupportedError,
     ProviderError,
     RateLimitError,
@@ -50,8 +51,24 @@ from datakodo.core.interfaces import check_capability
 from datakodo.ops.pagination import paginate
 from datakodo.ops.resample import pick_source_timeframe
 from datakodo.ops.validation import validate_ohlcv
-from datakodo.storage.cache import build_cache_key, compute_expiry, is_bar_closed
-from datakodo.storage.parquet import ParquetBackend
+
+# Canonical OHLCV columns: base + every Binance optional extra.
+MAPPER_COLUMNS = [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_timestamp",
+    "quote_volume",
+    "trades_count",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+    "vwap",
+]
+
+BASE_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume", "is_closed"]
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -74,18 +91,29 @@ RAW_KLINES = [RAW_KLINE]
 
 
 @pytest.fixture(autouse=True)
-def _clear_datakodo_env(monkeypatch):
-    """Make tests hermetic: drop real DATAKODO_* env vars.
+def _clear_env(monkeypatch):
+    """Make tests hermetic: drop real BINANCE_* / DATAKODO_* env vars.
 
     Without this, a developer's real API keys set in the environment leak
-    into ``Config`` defaults and break the default-value assertions.
+    into ``BinanceConfig`` defaults and break the default-value assertions.
     """
-    keys = list(Config.model_fields) + [
-        "DATAKODO_BINANCE_API_KEY",
-        "DATAKODO_BINANCE_API_SECRET",
+    keys = [
+        "BINANCE_API_KEY",
+        "BINANCE_API_SECRET",
+        "BINANCE_TESTNET",
+        "BINANCE_TLD",
+        "BINANCE_MARKET_TYPE",
+        "BINANCE_TIMEOUT",
+        "BINANCE_RATE_LIMIT_RATE",
+        "BINANCE_RATE_LIMIT_BURST",
+        "DATAKODO_OUTPUT_FORMAT",
+        "DATAKODO_MAX_RETRIES",
+        "DATAKODO_RETRY_BASE_DELAY",
+        "DATAKODO_FLAG_RESAMPLE",
+        "DATAKODO_LOG_LEVEL",
     ]
     for key in keys:
-        monkeypatch.delenv("DATAKODO_" + key.upper(), raising=False)
+        monkeypatch.delenv(key, raising=False)
 
 
 def _make_klines(n: int, start_ms: int = 1704067200000, step_ms: int = 3600_000) -> list:
@@ -112,26 +140,34 @@ def _make_klines(n: int, start_ms: int = 1704067200000, step_ms: int = 3600_000)
 # --- 1. Config ---------------------------------------------------------------
 
 
-def test_config_defaults():
+def test_binance_config_defaults():
+    cfg = BinanceConfig(_env_file=None)
+    assert cfg.api_key == ""
+    assert cfg.api_secret == ""
+    assert cfg.market_type == "spot"
+    assert cfg.tld == "com"
+    assert cfg.timeout == 10.0
+
+
+def test_binance_config_env_override(monkeypatch):
+    monkeypatch.setenv("BINANCE_API_KEY", "abc")
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    cfg = BinanceConfig(_env_file=None)
+    assert cfg.api_key == "abc"
+    assert cfg.testnet is True
+
+
+def test_binance_config_explicit_kwargs_win():
+    cfg = BinanceConfig(market_type="futures", tld="us", _env_file=None)
+    assert cfg.market_type == "futures"
+    assert cfg.tld == "us"
+
+
+def test_core_config_has_no_provider_fields():
     cfg = Config(_env_file=None)
-    assert cfg.binance_api_key == ""
-    assert cfg.binance_market_type == "spot"
-    assert cfg.binance_tld == "com"
-    assert cfg.binance_timeout == 10.0
-
-
-def test_config_env_override(monkeypatch):
-    monkeypatch.setenv("DATAKODO_BINANCE_API_KEY", "abc")
-    monkeypatch.setenv("DATAKODO_BINANCE_TESTNET", "true")
-    cfg = Config()
-    assert cfg.binance_api_key == "abc"
-    assert cfg.binance_testnet is True
-
-
-def test_config_explicit_kwargs_win():
-    cfg = Config(binance_market_type="futures", binance_tld="us")
-    assert cfg.binance_market_type == "futures"
-    assert cfg.binance_tld == "us"
+    dump = cfg.model_dump()
+    assert "binance_api_key" not in dump
+    assert "cache_enabled" not in dump
 
 
 # --- 2. Mapper ----------------------------------------------------------------
@@ -139,30 +175,32 @@ def test_config_explicit_kwargs_win():
 
 def test_map_ohlcv_columns():
     df = map_ohlcv(RAW_KLINES)
-    assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume", "session"]
+    assert list(df.columns) == MAPPER_COLUMNS
     assert df["timestamp"].iloc[0].tz is not None
     assert df["timestamp"].iloc[0] == pd.Timestamp(1704067200000, unit="ms", tz="UTC")
     assert df["open"].iloc[0] == 40000.0
-    assert df["session"].iloc[0] == "n/a"
+    assert df["vwap"].iloc[0] == pytest.approx(500000.0 / 12.5)  # quote_volume / volume
 
 
 def test_map_ohlcv_empty():
     df = map_ohlcv([])
     assert df.empty
-    assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume", "session"]
+    assert list(df.columns) == MAPPER_COLUMNS
 
 
-def test_map_trades_buy():
+def test_map_trades_sell_when_buyer_is_maker():
+    # m=True means the buyer is the maker, so the seller was the aggressor.
     trade = map_trades({"T": 1704067200000, "p": "50000.0", "q": "0.1", "m": True})
-    assert trade.side == "buy"
+    assert trade.side == "sell"
     assert trade.price == 50000.0
     assert trade.size == 0.1
     assert trade.timestamp.tz is not None
 
 
-def test_map_trades_sell_default():
+def test_map_trades_buy_when_buyer_is_taker():
+    # m=False means the buyer was the taker/aggressor.
     trade = map_trades({"T": 1704067200000, "p": "50001.0", "q": "0.2", "m": False})
-    assert trade.side == "sell"
+    assert trade.side == "buy"
 
 
 def test_map_fundamentals_ticker_and_info():
@@ -188,13 +226,13 @@ def test_map_fundamentals_ticker_and_info():
     }
     f = map_fundamentals(ticker, info)
     assert f.symbol == "BTCUSDT"
-    assert f.latest_price == 63758.0
-    assert f.volume_24h == 1234.5
-    assert f.high_24h == 64000.0
     assert f.currency == "USDT"
     assert f.exchange == "Binance"
-    assert f.timestamp is not None
+    assert f.as_of is not None
     assert f.crypto is not None
+    assert f.crypto.latest_price == 63758.0
+    assert f.crypto.volume_24h == 1234.5
+    assert f.crypto.high_24h == 64000.0
     assert f.crypto.base_asset == "BTC"
     assert f.crypto.status == "TRADING"
     assert f.crypto.permissions == ["SPOT", "MARGIN"]
@@ -302,9 +340,9 @@ def test_rest_klines_routes_to_futures():
 
 
 def test_ws_config_plumbing():
-    ws = BinanceWS(config=Config(binance_tld="us", binance_testnet=True))
-    assert ws._config.binance_tld == "us"
-    assert ws._config.binance_testnet is True
+    ws = BinanceWS(binance_config=BinanceConfig(tld="us", testnet=True))
+    assert ws._binance.tld == "us"
+    assert ws._binance.testnet is True
 
 
 def test_ws_stream_names(monkeypatch):
@@ -319,6 +357,9 @@ def test_ws_stream_names(monkeypatch):
 
         async def recv(self):
             return {"e": "x"}  # single message; test drains one then closes
+
+        async def close(self):
+            return None
 
     class FakeManager:
         def aggtrade_socket(self, symbol):
@@ -403,8 +444,8 @@ def test_adapter_check_capability_rejects_unsupported():
         check_capability(BinanceAdapter(), "supports_symbol_search")
 
 
-def test_adapter_fetch_ohlcv_mocked(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_adapter_fetch_ohlcv_mocked(monkeypatch):
+    adapter = BinanceAdapter()
     raw = _make_klines(3)
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: raw)
     df = adapter.fetch_ohlcv(
@@ -415,12 +456,12 @@ def test_adapter_fetch_ohlcv_mocked(monkeypatch, tmp_path):
         market_type="spot",
     )
     assert len(df) == 3
-    assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume", "session"]
+    assert list(df.columns) == BASE_COLUMNS
     assert df["timestamp"].is_monotonic_increasing
 
 
-def test_fetch_ohlcv_output_format_polars(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_output_format_polars(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
     out = adapter.fetch_ohlcv(
         "BTCUSDT",
@@ -434,8 +475,8 @@ def test_fetch_ohlcv_output_format_polars(monkeypatch, tmp_path):
     assert out.height == 2
 
 
-def test_fetch_ohlcv_output_format_arrow(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_output_format_arrow(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
     out = adapter.fetch_ohlcv(
         "BTCUSDT",
@@ -449,8 +490,8 @@ def test_fetch_ohlcv_output_format_arrow(monkeypatch, tmp_path):
     assert out.num_rows == 2
 
 
-def test_fetch_ohlcv_batch_returns_mapping(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_batch_returns_mapping(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
     result = adapter.fetch_ohlcv_batch(
         ["BTCUSDT", "ETHUSDT"],
@@ -458,24 +499,15 @@ def test_fetch_ohlcv_batch_returns_mapping(monkeypatch, tmp_path):
         datetime(2024, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 2, tzinfo=UTC),
         market_type="spot",
-        persist=False,
     )
     assert set(result) == {"BTCUSDT", "ETHUSDT"}
     for df in result.values():
         assert len(df) == 2
-        assert list(df.columns) == [
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "session",
-        ]
+        assert list(df.columns) == BASE_COLUMNS
 
 
-def test_fetch_ohlcv_batch_combine(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_batch_combine(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
     combined = adapter.fetch_ohlcv_batch(
         ["BTCUSDT", "ETHUSDT"],
@@ -484,7 +516,6 @@ def test_fetch_ohlcv_batch_combine(monkeypatch, tmp_path):
         datetime(2024, 1, 2, tzinfo=UTC),
         combine=True,
         market_type="spot",
-        persist=False,
     )
     assert len(combined) == 4
     assert "symbol" in combined.columns
@@ -499,8 +530,8 @@ def test_fetch_ohlcv_batch_empty_symbols_raises():
         )
 
 
-def test_fetch_ohlcv_batch_output_format(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_batch_output_format(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(2))
     result = adapter.fetch_ohlcv_batch(
         ["BTCUSDT", "ETHUSDT"],
@@ -509,15 +540,14 @@ def test_fetch_ohlcv_batch_output_format(monkeypatch, tmp_path):
         datetime(2024, 1, 2, tzinfo=UTC),
         output_format="polars",
         market_type="spot",
-        persist=False,
     )
     for frame in result.values():
         assert type(frame).__name__ == "DataFrame"  # polars.DataFrame
         assert frame.height == 2
 
 
-def test_fetch_ohlcv_batch_respects_max_workers(monkeypatch, tmp_path):
-    adapter = BinanceAdapter(storage=ParquetBackend(base_dir=str(tmp_path)))
+def test_fetch_ohlcv_batch_respects_max_workers(monkeypatch):
+    adapter = BinanceAdapter()
     monkeypatch.setattr(adapter._rest, "klines", lambda *a, **k: _make_klines(1))
     result = adapter.fetch_ohlcv_batch(
         ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
@@ -526,7 +556,6 @@ def test_fetch_ohlcv_batch_respects_max_workers(monkeypatch, tmp_path):
         datetime(2024, 1, 2, tzinfo=UTC),
         max_workers=2,
         market_type="spot",
-        persist=False,
     )
     assert set(result) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
 
@@ -567,7 +596,7 @@ def test_adapter_fetch_fundamentals_mocked(monkeypatch):
 
     f = adapter.fetch_fundamentals("BTCUSDT", market_type="spot")
     assert f.symbol == "BTCUSDT"
-    assert f.latest_price == 63758.0
+    assert f.crypto.latest_price == 63758.0
     assert f.crypto.status == "TRADING"
 
 
@@ -580,10 +609,10 @@ def test_adapter_supports_fundamentals():
 # --- 5d. Client facade ---------------------------------------------------------------
 
 
-def test_client_binance_dispatch(monkeypatch, tmp_path):
+def test_client_binance_dispatch(monkeypatch):
     from datakodo import Client
 
-    client = Client("binance", config=Config(cache_enabled=False))
+    client = Client("binance", config=Config())
     assert repr(client).startswith("Client(provider=")
     assert client.adapter is not None
 
@@ -658,7 +687,6 @@ def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
         datetime(2024, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 1, 4, tzinfo=UTC),
         market_type="spot",
-        persist=False,
     )
     assert len(df) == 1
     assert df.loc[0, "open"] == 100.0  # first source open
@@ -686,7 +714,6 @@ def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
         datetime(2024, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 1, 2, tzinfo=UTC),
         market_type="spot",
-        persist=False,
     )
     assert captured["interval"] == "1h"
     assert len(df) == 1
@@ -706,7 +733,6 @@ def test_fetch_ohlcv_no_native_source_raises():
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 1, 30, tzinfo=UTC),
             market_type="spot",
-            persist=False,
         )
 
 
@@ -764,7 +790,7 @@ def _ohlcv_df(timestamps):
             "low": [0.5] * len(timestamps),
             "close": [1.5] * len(timestamps),
             "volume": [10.0] * len(timestamps),
-            "session": ["n/a"] * len(timestamps),
+            "is_closed": [True] * len(timestamps),
         }
     )
 
@@ -777,68 +803,22 @@ def test_validate_ohlcv_ok():
 
 
 def test_validate_ohlcv_empty_raises():
-    with pytest.raises(ValueError):
+    with pytest.raises(DataValidationError):
         validate_ohlcv(pd.DataFrame())
 
 
 def test_validate_ohlcv_high_below_low_raises():
     df = _ohlcv_df([pd.Timestamp(1704067200000, unit="ms", tz="UTC")])
     df.loc[0, "high"] = 0.1
-    with pytest.raises(ValueError):
+    with pytest.raises(DataValidationError):
         validate_ohlcv(df)
 
 
 def test_validate_ohlcv_duplicate_timestamps_raises():
     ts = pd.Timestamp(1704067200000, unit="ms", tz="UTC")
     df = _ohlcv_df([ts, ts])
-    with pytest.raises(ValueError):
+    with pytest.raises(DataValidationError):
         validate_ohlcv(df)
-
-
-# --- 8. Cache --------------------------------------------------------------------
-
-
-def test_build_cache_key():
-    key = build_cache_key("binance-spot", "BTCUSDT", "1h", ("2024-01-01", "2024-01-02"))
-    assert key == "binance-spot/BTCUSDT/1h/2024-01-01_2024-01-02"
-
-
-def test_is_bar_closed():
-    assert is_bar_closed(datetime(2020, 1, 1, tzinfo=UTC), "1d") is True
-    assert is_bar_closed(datetime.now(UTC) + pd.Timedelta(hours=1), "1d") is False
-
-
-def test_compute_expiry():
-    assert compute_expiry("1m") <= datetime.now(UTC) + pd.Timedelta(minutes=6)
-    assert compute_expiry("1d") > datetime.now(UTC) + pd.Timedelta(days=365)
-
-
-# --- 9. Parquet storage -------------------------------------------------------------
-
-
-def test_parquet_roundtrip(tmp_path):
-    store = ParquetBackend(base_dir=str(tmp_path))
-    df = _ohlcv_df([pd.Timestamp(1704067200000, unit="ms", tz="UTC")])
-    key = "binance-spot/BTCUSDT/1h/2024-01-01_2024-01-02"
-
-    assert store.exists(key) is False
-    store.write(key, df)
-    assert store.exists(key) is True
-    out = pd.DataFrame(store.read(key))
-    assert list(out.columns) == list(df.columns)
-    assert len(out) == len(df)
-
-
-def test_parquet_read_missing_raises(tmp_path):
-    store = ParquetBackend(base_dir=str(tmp_path))
-    with pytest.raises(KeyError):
-        store.read("does/not/exist")
-
-
-def test_parquet_write_rejects_non_dataframe(tmp_path):
-    store = ParquetBackend(base_dir=str(tmp_path))
-    with pytest.raises(TypeError):
-        store.write("some/key", "not a dataframe")
 
 
 if __name__ == "__main__":

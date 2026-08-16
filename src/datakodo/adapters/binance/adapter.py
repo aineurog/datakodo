@@ -1,22 +1,24 @@
 """Binance adapter: implements the AdapterInterface for Binance.
 
-Supports both the spot and USD-M perpetual futures markets. OHLCV is
-fetched for either market, validated, and optionally persisted to a
-storage backend to form a simple ingestion pipeline.
+Supports the spot and USD-M perpetual futures markets. OHLCV is fetched,
+validated, and (when a non-native timeframe is requested) resampled locally.
+No local cache is kept: every fetch returns the provider's latest truth
+(design doc sec 18).
 """
 
 import logging
 from datetime import UTC, datetime
 from typing import Any
 
-import pandas as pd
-
+from datakodo.adapters.binance.config import BinanceConfig
 from datakodo.adapters.binance.mapper import (
+    BINANCE_OHLCV_EXTRAS,
     map_fundamentals,
     map_ohlcv,
     map_orderbook,
     map_ticks,
     map_trades,
+    quote_asset,
 )
 from datakodo.adapters.binance.rest import BinanceREST
 from datakodo.adapters.binance.ws import BinanceWS
@@ -24,36 +26,22 @@ from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import DataNotAvailableError
 from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
-from datakodo.core.interfaces import AdapterInterface
-from datakodo.core.schemas import Fundamentals, OrderBook, Trade
+from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.core.schemas import OrderBook, Trade, resolve_ohlcv_columns
 from datakodo.core.timeframe import BINANCE_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
 from datakodo.ops.resample import pick_source_timeframe, resample
-from datakodo.ops.validation import drop_incomplete_bars, validate_ohlcv
-from datakodo.storage.cache import build_cache_key
-from datakodo.storage.parquet import ParquetBackend
+from datakodo.ops.validation import add_is_closed, validate_ohlcv
 
 logger = logging.getLogger(__name__)
-
-
-def _base_asset(symbol: str) -> str:
-    """Best-effort quote asset for a symbol such as ``BTCUSDT``."""
-    if symbol.endswith("USDT"):
-        return "USDT"
-    if symbol.endswith("BUSD"):
-        return "BUSD"
-    if symbol.endswith("USDC"):
-        return "USDC"
-    return symbol[-4:]
 
 
 class BinanceAdapter(AdapterInterface):
     """Binance spot/perpetual futures market data adapter.
 
     Capabilities: OHLCV (spot + futures), ticks (historical + streaming),
-    streaming order book. ``fetch_ohlcv`` validates the result and, when a
-    storage backend is configured, persists it under a deterministic cache key.
+    order book snapshot + streaming, fundamentals, and instrument search.
     """
 
     supports_ohlcv = True
@@ -65,25 +53,28 @@ class BinanceAdapter(AdapterInterface):
 
     native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
     """Binance offers every canonical timeframe natively, so no resampling is
-    needed for Binance — the mechanism (design doc sec 7) still runs for
+    needed for Binance — the mechanism (design doc sec 8) still runs for
     adapters that restrict this list."""
 
     def __init__(
         self,
-        api_key: str = "",
-        api_secret: str = "",
-        storage: ParquetBackend | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
         config: Config | None = None,
+        binance_config: BinanceConfig | None = None,
     ) -> None:
         self._config = config or Config()
-        self._rest = BinanceREST(api_key, api_secret, config=self._config)
-        self._ws = BinanceWS(api_key, api_secret, config=self._config)
-        if storage is not None:
-            self._storage = storage
-        elif self._config.cache_enabled:
-            self._storage = ParquetBackend(base_dir=str(self._config.cache_dir))
-        else:
-            self._storage = ParquetBackend(base_dir="")
+        self._binance = binance_config or BinanceConfig()
+        # Explicit credentials win over the environment (design doc sec 15).
+        updates: dict[str, Any] = {}
+        if api_key is not None:
+            updates["api_key"] = api_key
+        if api_secret is not None:
+            updates["api_secret"] = api_secret
+        if updates:
+            self._binance = self._binance.model_copy(update=updates)
+        self._rest = BinanceREST(binance_config=self._binance, config=self._config)
+        self._ws = BinanceWS(binance_config=self._binance)
 
     # -- instruments --
 
@@ -93,7 +84,8 @@ class BinanceAdapter(AdapterInterface):
         Perpetual futures are described with a ``CryptoPerpetualExtension``;
         spot pairs use a plain base ``Instrument``.
         """
-        currency = _base_asset(symbol)
+        market_type = market_type or self._binance.market_type
+        currency = quote_asset(symbol)
         if market_type == "futures":
             return Instrument(
                 symbol=symbol,
@@ -113,60 +105,98 @@ class BinanceAdapter(AdapterInterface):
             currency=currency,
         )
 
+    def search_instruments(  # type: ignore[override]
+        self,
+        query: str = "",
+        *,
+        asset_class: Any = None,
+        instrument_type: Any = None,
+        quote: str | None = None,
+        exchange: str | None = None,
+        limit: int = 100,
+        market_type: str = "",
+    ) -> list[Instrument]:
+        """Search the Binance instrument universe (design doc sec 5).
+
+        Fetches ``exchangeInfo`` once and filters client-side. ``query`` is a
+        case-insensitive substring match on the symbol. All filters are
+        optional and combinable.
+        """
+        market_type = market_type or self._binance.market_type
+        entries = self._rest.all_symbols(market_type)
+        results: list[Instrument] = []
+        for entry in entries:
+            inst = self._instrument_from_entry(entry, market_type)
+            if query and query.lower() not in inst.symbol.lower():
+                continue
+            if asset_class is not None and inst.asset_class != asset_class:
+                continue
+            if instrument_type is not None and inst.instrument_type != instrument_type:
+                continue
+            if quote is not None and (entry.get("quoteAsset") or "").lower() != quote.lower():
+                continue
+            if exchange is not None and inst.exchange.lower() != exchange.lower():
+                continue
+            results.append(inst)
+            if len(results) >= limit:
+                break
+        logger.info("Binance %s search returned %d instruments", market_type, len(results))
+        return results
+
+    def _instrument_from_entry(self, entry: dict, market_type: str) -> Instrument:
+        """Build an Instrument from a raw ``exchangeInfo`` symbol entry."""
+        symbol = entry.get("symbol", "")
+        inst_type = InstrumentType.PERPETUAL if market_type == "futures" else InstrumentType.SPOT
+        return Instrument(
+            symbol=symbol,
+            provider_symbol=symbol,
+            asset_class=AssetClass.CRYPTO,
+            instrument_type=inst_type,
+            exchange="Binance",
+            currency=entry.get("quoteAsset") or quote_asset(symbol),
+        )
+
     # -- historical (sync) --
 
-    def fetch_ohlcv(
+    def fetch_ohlcv(  # type: ignore[override]
         self,
         symbol: str,
         timeframe: str,
         start: datetime,
         end: datetime,
+        *,
+        columns: str | list[str] = "basic",
         market_type: str = "",
-        persist: bool | None = None,
         include_live: bool = False,
         output_format: str | None = None,
-        force_refresh: bool = False,
     ) -> Any:
-        """Fetch OHLCV candles for a date range, validating and persisting them.
+        """Fetch OHLCV candles for a date range (design doc sec 6, 8).
 
         ``market_type`` selects spot or USD-M futures klines; it defaults to the
         value configured on the adapter. By default only fully **closed** bars
-        are returned (design doc sec 17/18): the still-forming last candle is
-        excluded before validation. Set ``include_live=True`` to keep the open
-        bar in the return value — though it is never written to cache. When
-        ``persist`` is true (default comes from config), the closed bars are
-        written to the configured storage backend under a deterministic cache key.
+        are returned (design doc sec 18); set ``include_live=True`` to keep the
+        still-forming bar, marked ``is_closed=False``.
 
-        If ``timeframe`` is not one of the adapter's ``native_timeframes``
-        (design doc sec 7), the nearest smaller native timeframe is fetched and
-        resampled up — controlled by ``Config.flag_resample`` for silent/flagged.
-        Resampled output is always fully closed.
+        If ``timeframe`` is not natively available it is derived by fetching the
+        nearest smaller native timeframe and resampling up (design doc sec 8),
+        controlled by ``Config.flag_resample`` for silent/flagged. Resampled
+        output is always fully closed.
+
+        ``columns`` selects the schema (design doc sec 3): ``"basic"`` returns
+        the invariant minimum; ``"all"`` returns every extra column Binance
+        offers; a list requests specific optional columns.
 
         ``output_format`` selects the user-facing representation (design doc
-        sec 12): pandas (default), polars, arrow, or numpy — per-call override
-        of ``Config.output_format``.
-
-        ``force_refresh`` bypasses the cache read path and always hits the
-        provider's API (design doc sec 17). The result is still persisted when
-        ``persist`` is true.
+        sec 13): pandas (default), polars, or arrow — a per-call override of
+        ``Config.output_format``.
         """
-        market_type = market_type or self._config.binance_market_type
-        persist = self._config.cache_enabled if persist is None else persist
-        key = build_cache_key(
-            f"binance-{market_type}", symbol, timeframe, (start.isoformat(), end.isoformat())
-        )
+        symbol = symbol_of(symbol)
+        market_type = market_type or self._binance.market_type
         tf = Timeframe(timeframe)
-
-        # Cache hit: return persisted data without touching the provider
-        # (design doc sec 17 — avoid re-fetching immutable historical data).
-        if persist and not force_refresh and not include_live and tf in self.native_timeframes:
-            cached = self._try_cache_read(key)
-            if cached is not None:
-                logger.info("Cache hit for %s (%d rows)", key, len(cached))
-                return to_output_format(cached, output_format or self._config.output_format)
 
         if tf in self.native_timeframes:
             df = self._fetch_ohlcv_native(symbol, timeframe, start, end, market_type, include_live)
+            available = BINANCE_OHLCV_EXTRAS
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
             self._log_resample(timeframe, source_tf.value)
@@ -175,6 +205,7 @@ class BinanceAdapter(AdapterInterface):
             )
             df = resample(source, tf)
             validate_ohlcv(df)
+            available = ()
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s %s",
                 source_tf.value,
@@ -184,23 +215,8 @@ class BinanceAdapter(AdapterInterface):
                 symbol,
             )
 
-        if persist:
-            # Only closed/final data is ever cached (design doc sec 17).
-            closed = df if not include_live else drop_incomplete_bars(df, timeframe)
-            self._storage.write(key, closed)
-            logger.info("Persisted OHLCV to cache key %s", key)
-        return to_output_format(df, output_format or self._config.output_format)
-
-    def _try_cache_read(self, key: str) -> pd.DataFrame | None:
-        """Return cached OHLCV data for *key* if it exists, else None."""
-        try:
-            if self._storage.exists(key):
-                df = pd.DataFrame(self._storage.read(key))
-                if not df.empty and "timestamp" in df.columns:
-                    return df
-        except (KeyError, TypeError):
-            pass
-        return None
+        resolved = resolve_ohlcv_columns(columns, available)
+        return to_output_format(df[resolved], output_format or self._config.output_format)
 
     def _fetch_ohlcv_native(
         self,
@@ -210,28 +226,28 @@ class BinanceAdapter(AdapterInterface):
         end: datetime,
         market_type: str,
         include_live: bool,
-    ) -> pd.DataFrame:
+    ) -> Any:
         """Fetch ``timeframe`` candles that the provider offers natively.
 
         Shared by ``fetch_ohlcv`` for the direct path and as the source when
-        resampling. Returns validated closed bars; ``include_live`` additionally
-        keeps the still-forming bar in the return value only.
+        resampling. Returns validated bars with an ``is_closed`` column;
+        ``include_live`` keeps the still-forming bar (marked ``is_closed=False``),
+        otherwise only closed bars are returned.
         """
         tf = Timeframe(timeframe)
         interval = BINANCE_MAP[tf]
 
-        def _fetch_chunk(
-            chunk_symbol: str, chunk_start: datetime, chunk_end: datetime
-        ) -> pd.DataFrame:
+        def _fetch_chunk(chunk_symbol: str, chunk_start: datetime, chunk_end: datetime) -> Any:
             raw = self._rest.klines(
                 chunk_symbol, interval, chunk_start, chunk_end, market_type=market_type
             )
             return map_ohlcv(raw)
 
         df = paginate(_fetch_chunk, symbol, tf, start, end)
+        df = add_is_closed(df, timeframe)
 
         if not include_live:
-            df = drop_incomplete_bars(df, timeframe)
+            df = df.loc[df["is_closed"]].reset_index(drop=True)
 
         if df.empty:
             raise DataNotAvailableError(
@@ -271,7 +287,8 @@ class BinanceAdapter(AdapterInterface):
         by aggregate id); without a ``start`` the most recent trades are fetched
         in a single call. Returns a list of canonical ``Trade`` records.
         """
-        market_type = market_type or self._config.binance_market_type
+        symbol = symbol_of(symbol)
+        market_type = market_type or self._binance.market_type
         if start is not None:
             raw = self._rest.ticks_all(
                 symbol,
@@ -294,7 +311,8 @@ class BinanceAdapter(AdapterInterface):
         market_type: str = "",
     ) -> OrderBook:
         """Fetch a single canonical order book snapshot for ``symbol``."""
-        market_type = market_type or self._config.binance_market_type
+        symbol = symbol_of(symbol)
+        market_type = market_type or self._binance.market_type
         raw = self._rest.orderbook(symbol, limit=limit, market_type=market_type)
         book = map_orderbook(raw)
         logger.info(
@@ -311,38 +329,37 @@ class BinanceAdapter(AdapterInterface):
         symbol: str,
         *,
         market_type: str = "",
-    ) -> Fundamentals:
+    ) -> Any:
         """Fetch canonical fundamentals for ``symbol`` (design doc sec 3).
 
         Combines the Binance 24h rolling ticker (live price/volume stats) with
         exchange info (base/quote asset, trading status, permissions). Returns a
         canonical ``Fundamentals`` record with a ``CryptoFundamentals`` block.
         """
-        market_type = market_type or self._config.binance_market_type
+        symbol = symbol_of(symbol)
+        market_type = market_type or self._binance.market_type
         ticker = self._rest.ticker_24h(symbol, market_type=market_type)
         info = self._rest.exchange_info(symbol, market_type=market_type)
         fundamentals = map_fundamentals(ticker, info)
-        logger.info(
-            "Fetched %s fundamentals for %s (latest=%s)",
-            market_type,
-            symbol,
-            fundamentals.latest_price,
-        )
+        latest = fundamentals.crypto.latest_price if fundamentals.crypto else None
+        logger.info("Fetched %s fundamentals for %s (latest=%s)", market_type, symbol, latest)
         return fundamentals
 
     # -- streaming (async) --
 
-    async def stream_trades(
-        self, symbol: str, market_type: str = "spot", max_messages: int | None = None
+    async def stream_trades(  # type: ignore[override]
+        self, symbol: str, market_type: str = "", max_messages: int | None = None
     ):
+        market_type = market_type or self._binance.market_type
         async for raw in self._ws.trade_stream(
             symbol, market_type=market_type, max_messages=max_messages
         ):
             yield map_trades(raw)
 
-    async def stream_orderbook(
-        self, symbol: str, market_type: str = "spot", max_messages: int | None = None
+    async def stream_orderbook(  # type: ignore[override]
+        self, symbol: str, market_type: str = "", max_messages: int | None = None
     ):
+        market_type = market_type or self._binance.market_type
         async for raw in self._ws.orderbook_stream(
             symbol, market_type=market_type, max_messages=max_messages
         ):

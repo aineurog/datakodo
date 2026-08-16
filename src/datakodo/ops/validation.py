@@ -1,72 +1,92 @@
 """Data quality validation.
 
-Post-fetch checks applied to every DataFrame before it reaches the user:
+Post-fetch checks applied to every frame before it reaches the user:
 no negative prices/volumes, high >= low, monotonically increasing
-timestamps, no gaps or duplicates. Also provides helpers to drop bars that
-are still forming (design doc sec 17 / 18).
+timestamps, no gaps or duplicates, and an ``is_closed`` flag on every bar.
+Validation failures raise ``DataValidationError`` (design doc sec 18).
 """
 
 import pandas as pd
 
+from datakodo.core.exceptions import DataValidationError
 from datakodo.core.timeframe import timeframe_delta
+
+
+def add_is_closed(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Append an ``is_closed`` column marking whether each bar is final.
+
+    A bar whose ``timestamp`` holds its **open** time is closed once
+    ``open_time + interval <= now`` (design doc sec 10, 18). Bars still
+    forming at call time are marked ``False``; every bar is ``True`` when the
+    range lies fully in the past. Returns a copy; the input is untouched.
+
+    Raises ``ValueError`` for an unknown ``timeframe``.
+    """
+    if "timestamp" not in df.columns:
+        return df.assign(is_closed=True)
+    delta = timeframe_delta(timeframe)
+    now = pd.Timestamp.now(tz="UTC")
+    ts = df["timestamp"]
+    if ts.dt.tz is None:
+        ts = ts.dt.tz_localize("UTC")
+    out = df.copy()
+    out["is_closed"] = ts + delta <= now
+    return out
 
 
 def drop_incomplete_bars(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """Drop bars that are still forming so only fully closed bars remain.
 
     A bar whose ``timestamp`` column holds its **open** time is closed once
-    ``open_time + interval <= now`` (design doc sec 17: only closed/final
-    data is cached and returned for analysis). Any bar still open at call
+    ``open_time + interval <= now`` (design doc sec 18: only closed/final
+    data is returned for analysis by default). Any bar still open at call
     time is removed. Raises ``ValueError`` for an unknown ``timeframe``.
     """
     if df.empty or "timestamp" not in df.columns:
         return df
-    delta = timeframe_delta(timeframe)
-    now = pd.Timestamp.now(tz="UTC")
-    ts = df["timestamp"]
-    if ts.dt.tz is None:
-        ts = ts.dt.tz_localize("UTC")
-    closed = ts + delta <= now
-    return df.loc[closed].copy()
+    out = add_is_closed(df, timeframe)
+    closed = out.loc[out["is_closed"]].drop(columns=["is_closed"])
+    return closed.reset_index(drop=True)
 
 
 def validate_ohlcv(df: pd.DataFrame) -> None:
-    """Run all quality checks on an OHLCV DataFrame.
+    """Run all quality checks on an OHLCV frame.
 
-    Raises ValueError with a descriptive message if any check fails.
+    Raises ``DataValidationError`` with a descriptive message if any check
+    fails (design doc sec 18).
     """
     if df.empty:
-        raise ValueError("OHLCV DataFrame is empty.")
+        raise DataValidationError("OHLCV frame is empty.")
 
-    required = {"timestamp", "open", "high", "low", "close", "volume"}
+    required = {"timestamp", "open", "high", "low", "close", "volume", "is_closed"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        raise DataValidationError(f"Missing required columns: {missing}")
 
     # No negative prices or volumes.
     for col in ("open", "high", "low", "close", "volume"):
         if (df[col] < 0).any():
-            raise ValueError(f"Column {col!r} contains negative values.")
+            raise DataValidationError(f"Column {col!r} contains negative values.")
 
     # High must be >= low on every row.
     if (df["high"] < df["low"]).any():
-        raise ValueError("Found rows where high < low.")
+        raise DataValidationError("Found rows where high < low.")
 
     # Timestamps must be strictly increasing.
     if not df["timestamp"].is_monotonic_increasing:
-        raise ValueError("Timestamps are not monotonically increasing.")
+        raise DataValidationError("Timestamps are not monotonically increasing.")
 
     # No duplicate timestamps.
     if df["timestamp"].duplicated().any():
-        raise ValueError("Duplicate timestamps found.")
+        raise DataValidationError("Duplicate timestamps found.")
 
 
 def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     """Return rows where the interval to the next bar exceeds one candle.
 
-    Expects a sorted, deduplicated OHLCV DataFrame. For each row, computes
-    the difference to the next row's timestamp; if that gap is larger than
-    one candle of ``timeframe``, the row is flagged as a gap boundary.
+    Expects a sorted, deduplicated OHLCV frame. For each row, computes the
+    difference to the next row's timestamp; if that gap is larger than one
+    candle of ``timeframe``, the row is flagged as a gap boundary.
 
     Returns:
         A DataFrame of rows that precede a gap, with an extra ``gap_missing``

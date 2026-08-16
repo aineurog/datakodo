@@ -60,7 +60,7 @@ class TestInstrument:
         ext = FutureExtension(expiry="2024-12-20", contract_size=100.0, tick_size=0.25)
         inst = Instrument(
             symbol="ESZ4",
-            asset_class=AssetClass.FUTURE,
+            asset_class=AssetClass.INDEX,
             instrument_type=InstrumentType.FUTURE,
             exchange="CME",
             currency="USD",

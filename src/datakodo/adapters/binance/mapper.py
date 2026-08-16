@@ -1,6 +1,7 @@
 """Binance raw response → canonical schema normalization.
 
-All normalization uses vectorized operations via pandas/polars.
+Normalization is vectorized: raw rows are converted to columnar frames in
+bulk rather than looped over row by row.
 """
 
 import pandas as pd
@@ -14,6 +15,31 @@ from datakodo.core.schemas import (
     Trade,
 )
 
+# Optional OHLCV columns the Binance mapper can produce (design doc sec 3).
+BINANCE_OHLCV_EXTRAS: tuple[str, ...] = (
+    "close_timestamp",
+    "quote_volume",
+    "trades_count",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+    "vwap",
+)
+
+_BASE_OHLCV_COLUMNS = ("timestamp", "open", "high", "low", "close", "volume")
+
+# Binance kline field indexes (official docs).
+_K_OPEN_TIME = 0
+_K_OPEN = 1
+_K_HIGH = 2
+_K_LOW = 3
+_K_CLOSE = 4
+_K_VOLUME = 5
+_K_CLOSE_TIME = 6
+_K_QUOTE_VOLUME = 7
+_K_TRADES = 8
+_K_TAKER_BUY_BASE = 9
+_K_TAKER_BUY_QUOTE = 10
+
 
 def map_ohlcv(raw: list) -> pd.DataFrame:
     """Convert raw Binance klines into a DataFrame of canonical OHLCV rows.
@@ -25,34 +51,50 @@ def map_ohlcv(raw: list) -> pd.DataFrame:
           taker_buy_quote, ignore
         ]
 
-    Returns a DataFrame with columns matching the OHLCV schema.
+    Returns a DataFrame with the base OHLCV columns plus every optional extra
+    Binance provides. ``is_closed`` is not set here (it depends on the
+    timeframe); the adapter computes it via ``ops.validation.add_is_closed``.
     """
+    columns = list(_BASE_OHLCV_COLUMNS) + list(BINANCE_OHLCV_EXTRAS)
     if not raw:
-        cols = ["timestamp", "open", "high", "low", "close", "volume", "session"]
-        return pd.DataFrame(columns=cols)
+        return pd.DataFrame(columns=columns)
 
-    rows = [
+    df = pd.DataFrame(raw)
+
+    out = pd.DataFrame(
         {
-            "timestamp": pd.Timestamp(k[0], unit="ms", tz="UTC"),
-            "open": float(k[1]),
-            "high": float(k[2]),
-            "low": float(k[3]),
-            "close": float(k[4]),
-            "volume": float(k[5]),
-            "session": "n/a",
+            "timestamp": pd.to_datetime(df[_K_OPEN_TIME], unit="ms", utc=True),
+            "open": pd.to_numeric(df[_K_OPEN]),
+            "high": pd.to_numeric(df[_K_HIGH]),
+            "low": pd.to_numeric(df[_K_LOW]),
+            "close": pd.to_numeric(df[_K_CLOSE]),
+            "volume": pd.to_numeric(df[_K_VOLUME]),
+            "close_timestamp": pd.to_datetime(df[_K_CLOSE_TIME], unit="ms", utc=True),
+            "quote_volume": pd.to_numeric(df[_K_QUOTE_VOLUME]),
+            "trades_count": pd.to_numeric(df[_K_TRADES]).astype("Int64"),
+            "taker_buy_base_volume": pd.to_numeric(df[_K_TAKER_BUY_BASE]),
+            "taker_buy_quote_volume": pd.to_numeric(df[_K_TAKER_BUY_QUOTE]),
         }
-        for k in raw
-    ]
-    return pd.DataFrame(rows)
+    )
+    volume = pd.to_numeric(df[_K_VOLUME]).replace(0, pd.NA)
+    out["vwap"] = pd.to_numeric(df[_K_QUOTE_VOLUME]) / volume
+    return out
 
 
 def map_trades(raw: dict) -> Trade:
-    """Convert a single raw Binance trade message into a canonical Trade."""
+    """Convert a single raw Binance trade message into a canonical Trade.
+
+    Binance aggTrade ``m`` is "buyer is the maker". The canonical ``side`` is
+    the aggressor/taker side, so ``m=True`` means the seller was the taker
+    (``side="sell"``) and ``m=False`` means the buyer was the taker
+    (``side="buy"``).
+    """
     return Trade(
         timestamp=pd.Timestamp(raw["T"], unit="ms", tz="UTC"),
         price=float(raw["p"]),
         size=float(raw["q"]),
-        side="buy" if raw.get("m", False) else "sell",
+        side="sell" if raw.get("m", False) else "buy",
+        trade_id=int(raw["a"]) if "a" in raw else None,
     )
 
 
@@ -70,61 +112,34 @@ def map_fundamentals(ticker: dict, info: dict | None = None) -> Fundamentals:
     asset-class-specific ``CryptoFundamentals`` block.
     """
     info = info or {}
+    symbol = ticker.get("symbol", "")
     close_ms = ticker.get("closeTime")
     return Fundamentals(
-        symbol=ticker.get("symbol", ""),
+        symbol=symbol,
+        name=symbol,
         asset_class=AssetClass.CRYPTO,
         instrument_type=InstrumentType.SPOT,
-        currency=(
-            ticker.get("quoteAsset")
-            or info.get("quoteAsset")
-            or _quote_asset(ticker.get("symbol", ""))
-        ),
+        currency=ticker.get("quoteAsset") or info.get("quoteAsset") or quote_asset(symbol),
         exchange="Binance",
-        latest_price=_to_opt_float(ticker.get("lastPrice")),
-        price_change_24h=_to_opt_float(ticker.get("priceChange")),
-        open_24h=_to_opt_float(ticker.get("openPrice")),
-        high_24h=_to_opt_float(ticker.get("highPrice")),
-        low_24h=_to_opt_float(ticker.get("lowPrice")),
-        volume_24h=_to_opt_float(ticker.get("volume")),
-        quote_volume_24h=_to_opt_float(ticker.get("quoteVolume")),
-        timestamp=pd.Timestamp(close_ms, unit="ms", tz="UTC").to_pydatetime()
+        as_of=pd.Timestamp(close_ms, unit="ms", tz="UTC").to_pydatetime()
         if close_ms is not None
         else None,
         crypto=CryptoFundamentals(
-            base_asset=info.get("baseAsset", "") or _base_asset(ticker.get("symbol", "")),
-            quote_asset=info.get("quoteAsset", "") or _quote_asset(ticker.get("symbol", "")),
+            base_asset=info.get("baseAsset", "") or base_asset(symbol),
+            quote_asset=info.get("quoteAsset", "") or quote_asset(symbol),
             status=info.get("status", "TRADING"),  # TRADING / BREAK / HALT
             is_spot_trading_allowed=info.get("isSpotTradingAllowed"),
             is_margin_trading_allowed=info.get("isMarginTradingAllowed"),
             permissions=info.get("permissions") or ["SPOT"],
-            asset_class=AssetClass.CRYPTO,
-            instrument_type=InstrumentType.SPOT,
+            latest_price=_to_opt_float(ticker.get("lastPrice")),
+            price_change_24h=_to_opt_float(ticker.get("priceChange")),
+            open_24h=_to_opt_float(ticker.get("openPrice")),
+            high_24h=_to_opt_float(ticker.get("highPrice")),
+            low_24h=_to_opt_float(ticker.get("lowPrice")),
+            volume_24h=_to_opt_float(ticker.get("volume")),
+            quote_volume_24h=_to_opt_float(ticker.get("quoteVolume")),
         ),
     )
-
-
-def _to_opt_float(value) -> float | None:
-    """Parse a numeric string (Binance returns floats as strings) to float/None."""
-    if value in (None, "", "-"):
-        return None
-    return float(value)
-
-
-def _base_asset(symbol: str) -> str:
-    """Derive the base asset from a symbol such as ``BTCUSDT`` → ``BTC``."""
-    for quote in ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"):
-        if symbol.endswith(quote) and len(symbol) > len(quote):
-            return symbol[: -len(quote)]
-    return symbol
-
-
-def _quote_asset(symbol: str) -> str:
-    """Derive the quote asset from a symbol such as ``BTCUSDT`` → ``USDT``."""
-    for quote in ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"):
-        if symbol.endswith(quote):
-            return quote
-    return ""
 
 
 def map_orderbook(raw: dict) -> OrderBook:
@@ -133,6 +148,8 @@ def map_orderbook(raw: dict) -> OrderBook:
     Binance depth rows are ``[price, quantity]`` pairs under ``bids``/``asks``.
     When the payload carries an exchange event time (``E``, as USD-M futures
     does) that is used; otherwise the timestamp is stamped locally (spot).
+    ``last_update_id`` carries the provider's sequence number for later delta
+    reconstruction.
     """
     event_ms = raw.get("E") or raw.get("T")
     timestamp = (
@@ -146,4 +163,28 @@ def map_orderbook(raw: dict) -> OrderBook:
         timestamp=timestamp.to_pydatetime(),
         bids=[OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in bids_raw],
         asks=[OrderBookLevel(price=float(row[0]), size=float(row[1])) for row in asks_raw],
+        last_update_id=raw.get("lastUpdateId"),
     )
+
+
+def _to_opt_float(value) -> float | None:
+    """Parse a numeric string (Binance returns floats as strings) to float/None."""
+    if value in (None, "", "-"):
+        return None
+    return float(value)
+
+
+def base_asset(symbol: str) -> str:
+    """Derive the base asset from a symbol such as ``BTCUSDT`` → ``BTC``."""
+    for quote in ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"):
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            return symbol[: -len(quote)]
+    return symbol
+
+
+def quote_asset(symbol: str) -> str:
+    """Derive the quote asset from a symbol such as ``BTCUSDT`` → ``USDT``."""
+    for quote in ("USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"):
+        if symbol.endswith(quote):
+            return quote
+    return ""

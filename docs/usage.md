@@ -16,10 +16,11 @@ perpetual futures** market data through the canonical DataKodo API:
 
 - Historical data over REST: OHLCV candles, trade ticks, order book snapshots.
 - Real-time data over WebSocket: live trade and order book streams.
+- Instrument search over the full symbol list.
 - Public market data needs **no API key**.
 
 Both markets use the same interface — pass `market_type="spot"` or
-`market_type="futures"` (defaults to `config.binance_market_type`).
+`market_type="futures"` (defaults to `binance_config.market_type`).
 
 ## Installation
 
@@ -49,64 +50,79 @@ df = adapter.fetch_ohlcv(
 print(df)
 ```
 
-The result is a `pandas.DataFrame` with columns
-`timestamp, open, high, low, close, volume, session`.
+The result is a `pandas.DataFrame` with the canonical base columns
+`timestamp, open, high, low, close, volume, is_closed`. See
+[Selecting columns](#selecting-columns) for the opt-in extra columns.
 
 ## Configuration
 
-Create a `Config` object first, then pass it to the adapter:
+DataKodo splits settings into two places:
+
+- **`BinanceConfig`** holds provider-specific settings (credentials, domain,
+  default market, rate limits). It reads environment variables prefixed with
+  `BINANCE_` (Binance's standard names) and an optional `.env` file.
+- **`Config`** holds cross-cutting settings (output format, retries,
+  resampling warnings, log level). It reads environment variables prefixed
+  with `DATAKODO_` and the same `.env` file.
+
+In most cases the defaults work and you need no arguments at all:
 
 ```python
-from datakodo import Config
 from datakodo.adapters.binance import BinanceAdapter
 
-config = Config()
-adapter = BinanceAdapter(config=config)
+adapter = BinanceAdapter()
 ```
 
-`Config` holds every setting the library uses. It reads its values from
-environment variables (prefixed with `DATAKODO_`) and an optional `.env`
-file in the project root, so in most cases `Config()` works with no
-arguments at all:
+To override provider settings, pass a `BinanceConfig`:
+
+```python
+from datakodo.adapters.binance import BinanceAdapter
+from datakodo.adapters.binance.config import BinanceConfig
+
+binance_config = BinanceConfig(market_type="futures", testnet=False)
+adapter = BinanceAdapter(binance_config=binance_config)
+```
+
+The same values can come from the environment or a `.env` file:
 
 ```bash
 # .env
-DATAKODO_BINANCE_MARKET_TYPE=spot
-DATAKODO_BINANCE_TESTNET=false
+BINANCE_MARKET_TYPE=spot
+BINANCE_TESTNET=false
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
 ```
 
-You can also set values directly in code:
-
-```python
-from datakodo import Config
-from datakodo.adapters.binance import BinanceAdapter
-
-config = Config(binance_market_type="futures", binance_testnet=False)
-adapter = BinanceAdapter(config=config)
-```
-
-Common Binance settings:
+Common `BinanceConfig` settings:
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `binance_market_type` | `"spot"` | Market used when a call does not specify one: `spot` or `futures`. |
-| `binance_testnet` | `False` | Use Binance's test network when `True`. |
-| `binance_tld` | `"com"` | Binance domain: `com`, `us`, `jp`, ... |
-| `binance_api_key` / `binance_api_secret` | `""` | Credentials. Public market data does not need them. |
-| `flag_resample` | `True` | Log a warning (instead of an info message) when a non-native timeframe is derived by resampling. |
+| `market_type` | `"spot"` | Market used when a call does not specify one: `spot` or `futures`. |
+| `testnet` | `False` | Use Binance's test network when `True`. |
+| `tld` | `"com"` | Binance domain: `com`, `us`, `jp`, ... |
+| `api_key` / `api_secret` | `""` | Credentials. Public market data does not need them. |
+| `timeout` | `10.0` | Per-request timeout in seconds. |
+| `rate_limit_rate` / `rate_limit_burst` | `100.0` / `1000` | Token-bucket rate limit. |
 
-Public market data needs **no API key**, so `Config()` is all you need to
-start fetching:
+Common cross-cutting `Config` settings:
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `output_format` | `"pandas"` | Default output format: `pandas`, `polars`, or `arrow`. |
+| `max_retries` | `3` | Retry attempts before giving up. |
+| `retry_base_delay` | `1.0` | Base delay (seconds) for exponential backoff. |
+| `flag_resample` | `True` | Log a warning (instead of an info message) when a non-native timeframe is derived by resampling. |
+| `log_level` | `"INFO"` | Root logger level. |
+
+Credentials can also be passed directly to the adapter constructor, which
+takes precedence over the environment:
 
 ```python
-from datakodo import Config
-from datakodo.adapters.binance import BinanceAdapter
-
-config = Config(binance_market_type="spot")
-adapter = BinanceAdapter(config=config)
-
-df = adapter.fetch_ohlcv("BTCUSDT", "1h", start, end)
+adapter = BinanceAdapter(api_key="...", api_secret="...")
 ```
+
+Public market data needs **no API key**, so `BinanceAdapter()` is all you need
+to start fetching.
 
 ## Timeframes
 
@@ -136,7 +152,10 @@ requested 4h, provider only has 1m  -> fetch 1m, resample to 4h
 
 Resampling is upsampling only: a timeframe smaller than the finest one the
 provider offers cannot be derived, and such a request raises a `ValueError`.
-Resampled output is always fully closed.
+Resampling is calendar-anchored (weekly bars start on Monday, monthly bars
+close on the calendar month end), and periods that span a gap in the source
+data are dropped rather than silently aggregated over the gap. Resampled
+output is always fully closed.
 
 By default a warning is logged when a non-native timeframe is derived by
 resampling. Set `flag_resample=False` on `Config` to log it quietly instead.
@@ -144,9 +163,8 @@ resampling. Set `flag_resample=False` on `Config` to log it quietly instead.
 ## Fetching OHLCV
 
 `fetch_ohlcv()` returns fully **closed** candles only: the still-forming
-(open) bar is excluded before the data is validated and cached. Set
-`include_live=True` to also return the open bar, but it is never written
-to cache.
+(open) bar is excluded before the data is validated. Set `include_live=True`
+to also return the open bar (marked `is_closed=False`).
 
 ```python
 from datetime import UTC, datetime
@@ -167,6 +185,27 @@ df = adapter.fetch_ohlcv(
 
 Raises `DataNotAvailableError` when no closed bars are available for the
 requested range.
+
+### Selecting columns
+
+By default you get the invariant base columns:
+
+```text
+timestamp, open, high, low, close, volume, is_closed
+```
+
+Binance also offers opt-in extra columns. Request them with the `columns`
+parameter:
+
+```python
+df = adapter.fetch_ohlcv("BTCUSDT", "1h", start, end, columns="all")
+df = adapter.fetch_ohlcv("BTCUSDT", "1h", start, end, columns=["vwap", "quote_volume"])
+```
+
+`columns` accepts `"basic"` (the default), `"all"` (every extra the provider
+offers), or an explicit list. Binance's extras are `close_timestamp`,
+`quote_volume`, `trades_count`, `taker_buy_base_volume`,
+`taker_buy_quote_volume`, and `vwap`.
 
 ## Batch / Multi-Symbol Fetching
 
@@ -199,18 +238,35 @@ a mapping. `max_workers` controls the thread pool size (defaults to
 ## Output Format
 
 `fetch_ohlcv()` (and `fetch_ohlcv_batch()`) return **pandas DataFrames** by
-default. You can request `polars`, `arrow`, or `numpy` instead, either globally
-on `Config` or per call:
+default. You can request `polars` or `arrow` instead, either globally on
+`Config` or per call:
 
 ```python
 from datakodo import Config
 
-config = Config(output_format="polars")          # global
+config = Config(output_format="polars")  # global
 df = adapter.fetch_ohlcv("BTCUSDT", "1h", start, end, output_format="arrow")  # per call
 ```
 
-Supported values: `pandas` (default), `polars`, `arrow`, `numpy`. An unsupported
-value raises `ValueError`.
+Supported values: `pandas` (default), `polars`, `arrow`. An unsupported value
+raises `ValueError`.
+
+## Instrument Search
+
+`search_instruments()` filters the Binance symbol list (from exchange info)
+client-side:
+
+```python
+from datakodo.adapters.binance import BinanceAdapter
+
+adapter = BinanceAdapter()
+
+btc_pairs = adapter.search_instruments("BTC", quote="USDT", limit=20)
+```
+
+Filters are optional and combinable: a case-insensitive `query` substring,
+`asset_class`, `instrument_type`, `quote` currency, and `exchange`. Each result
+is a canonical `Instrument` descriptor.
 
 ## Fundamentals / Reference Data
 
@@ -223,7 +279,7 @@ from datakodo.adapters.binance import BinanceAdapter
 
 adapter = BinanceAdapter()
 f = adapter.fetch_fundamentals("BTCUSDT", market_type="spot")
-print(f.latest_price, f.currency)          # 63758.0 USDT
+print(f.crypto.latest_price, f.currency)  # 63758.0 USDT
 print(f.crypto.status, f.crypto.base_asset)  # TRADING BTC
 ```
 
@@ -247,17 +303,19 @@ live) and `CLOSE_DELIVERY` (expiry settlement window).
 ## Client Facade
 
 `Client` is the provider-agnostic front door — the same code works for any
-registered provider. You can also register new providers without touching core:
+registered provider. Providers are discovered automatically through Python
+entry points; new providers can also be registered without touching core:
 
 ```python
-from datakodo import Client, Config
+from datakodo import Client
 
-client = Client("binance", config=Config(binance_market_type="spot"))
+client = Client("binance")
 df = client.fetch_ohlcv("BTCUSDT", "1h", start, end)
 client.fetch_fundamentals("BTCUSDT")
 ```
 
-Unregistered providers raise `ValueError` listing the available ones.
+Unregistered providers raise `ValueError` listing the available ones. See
+`Client.available_providers()` for the current list.
 
 ## Adapter Lifecycle
 
@@ -279,7 +337,7 @@ available explicitly.
 ## Fetching Trade Data
 
 `fetch_ticks()` returns recent or historical trade ticks as a list of
-canonical `Trade` records (`timestamp`, `price`, `size`, `side`).
+canonical `Trade` records (`timestamp`, `price`, `size`, `side`, `trade_id`).
 
 - Without `start`: the most recent trades, in a single call.
 - With `start`: the full range is paged automatically (Binance caps each
@@ -297,8 +355,8 @@ print(recent[0].price, recent[0].side)
 ## Fetching the Order Book
 
 `fetch_orderbook_snapshot()` returns a single canonical `OrderBook`
-(`timestamp`, `bids`, `asks`, each level a `price`/`size` pair). The
-`limit` is clamped to the depths Binance supports.
+(`timestamp`, `bids`, `asks`, `last_update_id`, each level a `price`/`size`
+pair). The `limit` is clamped to the depths Binance supports.
 
 ```python
 from datakodo.adapters.binance import BinanceAdapter
@@ -338,20 +396,6 @@ Available streams:
 | `stream_trades(symbol, market_type, max_messages)` | Canonical `Trade` records. |
 | `stream_orderbook(symbol, market_type, max_messages)` | Raw Binance depth messages. |
 
-## Caching
-
-Closed historical data is cached locally (Parquet) and treated as immutable
-— it is only re-fetched on an explicit refresh. The still-forming candle is
-never cached.
-
-```python
-from datakodo import Config
-from datakodo.adapters.binance import BinanceAdapter
-
-config = Config(cache_enabled=True, cache_dir="datakodo_cache")
-adapter = BinanceAdapter(config=config)
-```
-
 ## Rate Limiting
 
 Requests are gated by a token bucket so the configured Binance rate limit
@@ -362,3 +406,6 @@ from datakodo import Config
 
 config = Config(max_retries=5, retry_base_delay=2.0)
 ```
+
+Rate-limited and connection-failed requests are retried with exponential
+backoff; when the budget is exhausted a `RetriesExhaustedError` is raised.

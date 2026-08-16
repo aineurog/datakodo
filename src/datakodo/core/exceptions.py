@@ -33,6 +33,16 @@ class ConnectionError(DataLibError):
     """Network or transport-level failure."""
 
 
+class TimeoutError(DataLibError):
+    """A request timed out. Distinct from ``ConnectionError``: a timeout is a
+    single stalled request and carries different retry semantics than a
+    transport failure."""
+
+
+class RetriesExhaustedError(DataLibError):
+    """Exponential backoff gave up after the configured retry budget."""
+
+
 class DataNotAvailableError(DataLibError):
     """Data exists but is gated behind a tier / subscription level."""
 
@@ -43,6 +53,10 @@ class NotSupportedError(DataLibError):
 
 class PaidTierRequiredError(DataLibError):
     """The requested endpoint requires a paid provider tier."""
+
+
+class DataValidationError(DataLibError):
+    """The provider returned data that failed quality checks."""
 
 
 class ProviderError(DataLibError):

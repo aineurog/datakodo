@@ -9,15 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Core canonical schemas: OHLCV, Trade, OrderBook (Pydantic v2, schema version 1.0).
+- Canonical OHLCV base columns with an `is_closed` flag and opt-in extra columns
+  selected via `columns="basic"|"all"|list`.
 - Structured Instrument model with typed asset class extensions.
-- Abstract AdapterInterface and StorageBackend contracts.
 - Canonical Fundamentals schema (common base + asset-class block).
+- Abstract AdapterInterface contract with capability flags and a concurrency
+  model (`thread` vs `serial`).
 - Adapter lifecycle: connect/disconnect/close + `with adapter:` support.
-- Client facade (`Client(provider, config=...)`) with a provider registry.
-- Standardized exception hierarchy containing authentication, rate limit,
-  symbol not found, and other provider mapped errors.
+- Client facade (`Client(provider, config=...)`) with a provider registry and
+  entry-point adapter discovery (`datakodo.adapters` group).
+- `search_instruments` for filtering a provider's instrument universe.
+- Standardized exception hierarchy: authentication, rate limit, symbol not
+  found, timeout, retries exhausted, data validation, and provider-mapped errors.
 - Config system via pydantic-settings with .env support.
-- Configurable output format: pandas, polars, arrow, numpy.
+- Provider-specific settings (e.g. `BinanceConfig`) decoupled from the global
+  `Config`; keys come from environment variables or explicit adapter arguments.
+- Configurable output format: pandas, polars, arrow.
 - Adapter scaffolding for Binance, Alpaca, Polygon, MT5, and IBKR.
 - Each adapter subpackage includes rest, websocket, and mapper modules.
 - Token bucket rate limiter per provider instance.
@@ -25,20 +32,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Streaming base utilities: automatic reconnect with exponential backoff
   and async generator merging.
 - Order book maintainer for snapshot + delta L2 book tracking.
-- Timeframe resampling with standard OHLCV aggregation rules.
+- Gap-aware, calendar-anchored timeframe resampling with standard OHLCV
+  aggregation rules.
 - Auto pagination and stitching across large date ranges.
 - Batch / multi-symbol OHLCV fetching (`fetch_ohlcv_batch`).
 - Data quality validation: non negative prices, high >= low, monotonic
-  timestamps, duplicate detection.
+  timestamps, duplicate detection, and closed-bar marking.
 - Corporate actions: split and dividend price adjustments.
-- Parquet storage backend implementing the StorageBackend interface.
-- Cache key generation and invalidation rules.
 - Provider extras in pyproject.toml for all five Phase 1 adapters.
 - CI workflow: ruff lint, mypy type check, pytest with coverage on every push.
 - Gated integration test workflow for live API tests.
+
+### Removed
+- Local caching / Parquet storage layer. Fetches always return the provider's
+  latest truth; bar closure is computed from each bar's open time.
 
 ### Added (Binance)
 - 24h ticker + exchange info fundamentals (`fetch_fundamentals`).
 - Historical trade ticks (`fetch_ticks`), paged and deduped.
 - Order book snapshot (`fetch_orderbook_snapshot`) with depth clamping.
+- Instrument search (`search_instruments`) over exchange info.
 - Spot + USD-M futures support with request-weight-aware rate limiting.
+- Retry with exponential backoff and a `RetriesExhaustedError` on budget.

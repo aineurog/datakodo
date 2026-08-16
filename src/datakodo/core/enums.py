@@ -4,17 +4,25 @@ from enum import StrEnum
 
 
 class AssetClass(StrEnum):
+    """Market taxonomy — the underlying asset category.
+
+    Derivative structures such as futures, options, and CFDs are not asset
+    classes; they live on ``InstrumentType``. A gold future is
+    ``(METAL, FUTURE)``, an index future is ``(INDEX, FUTURE)``, and so on.
+    """
+
     CRYPTO = "crypto"
     EQUITY = "equity"
     FOREX = "forex"
-    FUTURE = "future"
-    OPTION = "option"
     METAL = "metal"
     BOND = "bond"
-    CFD = "cfd"
+    INDEX = "index"
+    ETF = "etf"
 
 
 class InstrumentType(StrEnum):
+    """Settlement / derivative structure of an instrument."""
+
     SPOT = "spot"
     PERPETUAL = "perpetual"
     FUTURE = "future"
@@ -35,7 +43,11 @@ class Timeframe(StrEnum):
 
 
 class Session(StrEnum):
+    """Trading session for session-based assets (equity, forex).
+
+    Crypto and other 24/7 assets do not carry a session at all.
+    """
+
     PRE_MARKET = "pre_market"
     REGULAR = "regular"
     POST_MARKET = "post_market"
-    NA = "n/a"

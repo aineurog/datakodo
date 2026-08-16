@@ -19,6 +19,7 @@ from typing import Any
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 
+from datakodo.adapters.binance.config import BinanceConfig
 from datakodo.core.config import Config
 from datakodo.core.exceptions import (
     AuthenticationError,
@@ -26,6 +27,7 @@ from datakodo.core.exceptions import (
     DataLibError,
     ProviderError,
     RateLimitError,
+    RetriesExhaustedError,
     SymbolNotFoundError,
 )
 from datakodo.ratelimit.limiter import TokenBucket
@@ -63,43 +65,34 @@ class BinanceREST:
 
     Only the public market-data endpoints DataKodo needs are exposed. Requests
     are gated by a token bucket, and the library's own exceptions are mapped
-    to DataKodo exceptions.
+    to DataKodo exceptions. Provider settings (credentials, domain, rate
+    limits) come from a :class:`BinanceConfig`; retry/backoff settings come
+    from the global :class:`Config`.
     """
 
     def __init__(
         self,
-        api_key: str = "",
-        api_secret: str = "",
+        binance_config: BinanceConfig | None = None,
+        config: Config | None = None,
         *,
         timeout: float | None = None,
         rate_limit: tuple[float, int] | None = None,
-        config: Config | None = None,
     ) -> None:
-        cfg = config or Config()
-        if api_key:
-            cfg = cfg.model_copy(
-                update={
-                    "binance_api_key": api_key,
-                    "binance_api_secret": api_secret,
-                }
-            )
-        self._config = cfg
+        self._config = config or Config()
+        self._binance = binance_config or BinanceConfig()
         rate, burst = (
             rate_limit
             if rate_limit is not None
-            else (
-                cfg.binance_rate_limit_rate,
-                cfg.binance_rate_limit_burst,
-            )
+            else (self._binance.rate_limit_rate, self._binance.rate_limit_burst)
         )
         self._limiter = TokenBucket(rate=rate, burst=burst)
         self._client = Client(
-            cfg.binance_api_key,
-            cfg.binance_api_secret,
-            requests_params={"timeout": timeout if timeout is not None else cfg.binance_timeout},
+            self._binance.api_key,
+            self._binance.api_secret,
+            requests_params={"timeout": timeout if timeout is not None else self._binance.timeout},
             ping=False,
-            tld=cfg.binance_tld,
-            testnet=cfg.binance_testnet,
+            tld=self._binance.tld,
+            testnet=self._binance.testnet,
         )
 
     @staticmethod
@@ -180,9 +173,10 @@ class BinanceREST:
     def _call(self, caller: Any, weight: int, **params: Any) -> Any:
         """Run *caller* with rate limiting, retry, and exception mapping.
 
-        Retries on ``RateLimitError`` (HTTP 429 / code -1003) with exponential
-        backoff governed by ``Config.max_retries`` and ``Config.retry_base_delay``
-        (design doc sec 16).
+        Retries on ``RateLimitError`` (HTTP 429 / code -1003) and connection
+        failures with exponential backoff governed by ``Config.max_retries``
+        and ``Config.retry_base_delay`` (design doc sec 16/17). When the
+        retry budget is exhausted, raises ``RetriesExhaustedError``.
         """
         import time as _time
 
@@ -226,7 +220,9 @@ class BinanceREST:
                     continue
                 raise translated from exc
 
-        raise last_exc  # type: ignore[misc]  # unreachable per loop, safe guard
+        raise RetriesExhaustedError(
+            f"Binance request failed after {max_retries + 1} attempts."
+        ) from last_exc
 
     def _market_caller(self, name: str, market_type: str) -> Any:
         """Pick the spot vs futures client method for ``name``.
@@ -432,3 +428,15 @@ class BinanceREST:
             if entry.get("symbol") == symbol:
                 return dict(entry)
         return {}  # symbol not present on this market
+
+    def all_symbols(self, market_type: str = "spot") -> list[dict]:
+        """Fetch the full instrument list for ``market_type`` (design doc sec 5).
+
+        Returns the raw ``symbols`` list from ``exchange_info``, used to power
+        ``search_instruments`` without a separate provider call.
+        """
+        result = self._call(
+            self._market_caller("exchange_info", market_type),
+            2,  # flat weight on both spot and USD-M futures
+        )
+        return list(result.get("symbols") or [])

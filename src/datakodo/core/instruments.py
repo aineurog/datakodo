@@ -25,6 +25,26 @@ class FutureExtension(BaseModel):
     underlying: str = ""
 
 
+class OptionExtension(BaseModel):
+    strike: float = 0.0
+    expiry: str = ""
+    right: str = ""  # "call" or "put"
+    underlying: str = ""
+    contract_size: float = 1.0
+
+
+class BondExtension(BaseModel):
+    coupon: float = 0.0
+    maturity: str = ""
+    face_value: float = 0.0
+    issuer: str = ""
+    credit_rating: str = ""
+
+
+class MetalExtension(BaseModel):
+    unit: str = ""  # "oz" or "gram"
+
+
 class CryptoPerpetualExtension(BaseModel):
     funding_interval: int = 8
     funding_rate: float = 0.0
@@ -48,4 +68,7 @@ class Instrument(BaseModel):
     equity: EquityExtension | None = None
     forex: ForexExtension | None = None
     future: FutureExtension | None = None
+    option: OptionExtension | None = None
+    bond: BondExtension | None = None
+    metal: MetalExtension | None = None
     crypto_perpetual: CryptoPerpetualExtension | None = None
