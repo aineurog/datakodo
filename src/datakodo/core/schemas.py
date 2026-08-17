@@ -28,6 +28,8 @@ OHLCV_OPTIONAL_COLUMNS = (
     "taker_buy_quote_volume",
     "vwap",
     "turnover",
+    "spread",
+    "real_volume",
 )
 
 
@@ -101,6 +103,8 @@ class OHLCV(BaseModel):
     taker_buy_quote_volume: float | None = None
     vwap: float | None = None
     turnover: float | None = None
+    spread: float | None = None
+    real_volume: float | None = None
 
 
 class Trade(BaseModel):

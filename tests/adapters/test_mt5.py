@@ -17,9 +17,16 @@ from datakodo.adapters.mt5.mapper import (
     map_instrument,
     map_ohlcv,
 )
-from datakodo.adapters.mt5.terminal import MT5Terminal, _as_utc
+from datakodo.adapters.mt5.rest import MT5REST, _as_utc
+from datakodo.adapters.mt5.terminal import MT5Terminal
 from datakodo.core.enums import AssetClass, InstrumentType
-from datakodo.core.exceptions import ConnectionError, ProviderError, RateLimitError
+from datakodo.core.exceptions import (
+    ConnectionError,
+    DataNotAvailableError,
+    InvalidTimeframeError,
+    ProviderError,
+    RateLimitError,
+)
 
 # MT5 CopyRates returns a numpy structured array with these named columns.
 _RAW_DTYPE = np.dtype(
@@ -88,7 +95,7 @@ class TestMT5Config:
         assert cfg.login is None
 
 
-# --- terminal.MT5Terminal (mocked) ------------------------------------------
+# --- terminal.MT5Terminal (mocked) -----------------------------------------
 
 
 class FakeMT5Module:
@@ -104,6 +111,7 @@ class FakeMT5Module:
         self.error = (0, "ok")
         self.account = SimpleNamespace(login=12345, server="Broker-Demo")
         self.tick = SimpleNamespace(time=int(time.time()))
+        self.info = _symbol_info()  # EURUSD-like forex by default
         self.shutdown_called = False
 
     def initialize(self, *args, **kwargs) -> bool:
@@ -116,6 +124,9 @@ class FakeMT5Module:
 
     def account_info(self):
         return self.account
+
+    def symbol_info(self, symbol):
+        return self.info
 
     def symbol_info_tick(self, symbol):
         return self.tick
@@ -144,19 +155,6 @@ def fake_mt5(monkeypatch):
 
 
 class TestMT5TerminalMocked:
-    def test_not_connected_blocks_data_calls(self, fake_mt5):
-        term = MT5Terminal()
-        with pytest.raises(ConnectionError, match="not connected"):
-            term.copy_rates_range(
-                "EURUSD", 1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
-            )
-        with pytest.raises(ConnectionError, match="not connected"):
-            term.symbol_info("EURUSD")
-        with pytest.raises(ConnectionError, match="not connected"):
-            term.symbol_info_tick("EURUSD")
-        with pytest.raises(ConnectionError, match="not connected"):
-            term.symbol_select("EURUSD")
-
     def test_initialize_connects_and_stores_module(self, fake_mt5):
         term = MT5Terminal()
         assert term.initialize() is True
@@ -203,13 +201,37 @@ class TestMT5TerminalMocked:
         assert fake_mt5.shutdown_called is True
         assert term._mt5 is None
 
+
+# --- rest.MT5REST (mocked) ---------------------------------------------------
+
+
+def _connected_rest(fake_mt5, cfg: MT5Config | None = None) -> MT5REST:
+    """A connected terminal + MT5REST pair over the fake module."""
+    term = MT5Terminal(mt5_config=cfg)
+    term.initialize()
+    return MT5REST(term)
+
+
+class TestMT5RESTMocked:
+    def test_not_connected_blocks_data_calls(self):
+        rest = MT5REST(MT5Terminal())
+        with pytest.raises(ConnectionError, match="not connected"):
+            rest.copy_rates_range(
+                "EURUSD", 1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
+            )
+        with pytest.raises(ConnectionError, match="not connected"):
+            rest.symbol_info("EURUSD")
+        with pytest.raises(ConnectionError, match="not connected"):
+            rest.symbol_info_tick("EURUSD")
+        with pytest.raises(ConnectionError, match="not connected"):
+            rest.symbol_select("EURUSD")
+
     def test_copy_rates_range_shifts_to_server_time(self, fake_mt5):
         fake_mt5.tick = SimpleNamespace(time=int(time.time()) + 3 * 3600)  # GMT+3
-        term = MT5Terminal()
-        term.initialize()
+        rest = _connected_rest(fake_mt5)
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(minutes=100)
-        raw = term.copy_rates_range("EURUSD", 1, start, end)
+        raw = rest.copy_rates_range("EURUSD", 1, start, end)
         assert raw is not None
         symbol, timeframe, req_start, req_end = fake_mt5.calls[0]
         assert req_start == start + timedelta(hours=3)  # shifted into server time
@@ -217,10 +239,9 @@ class TestMT5TerminalMocked:
 
     def test_copy_rates_range_no_history_returns_none(self, fake_mt5, caplog):
         fake_mt5.tick = SimpleNamespace(time=int(time.time()))
-        term = MT5Terminal()
-        term.initialize()
+        rest = _connected_rest(fake_mt5)
         with caplog.at_level(logging.WARNING):
-            out = term.copy_rates_range(
+            out = rest.copy_rates_range(
                 "EURUSD", 1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)
             )
         assert out is None
@@ -228,53 +249,49 @@ class TestMT5TerminalMocked:
 
     def test_server_offset_seconds_snaps_to_hour(self, fake_mt5):
         fake_mt5.tick = SimpleNamespace(time=int(time.time()) + 3 * 3600 + 55)
-        term = MT5Terminal()
-        term._mt5 = fake_mt5
-        term._connected = True
-        assert term.server_offset_seconds("EURUSD") == 3 * 3600
+        rest = _connected_rest(fake_mt5)
+        assert rest.server_offset_seconds("EURUSD") == 3 * 3600
 
     def test_server_offset_zero_when_no_tick(self, fake_mt5):
         fake_mt5.tick = None
-        term = MT5Terminal()
-        term._mt5 = fake_mt5
-        term._connected = True
-        assert term.server_offset_seconds("EURUSD") == 0
+        rest = _connected_rest(fake_mt5)
+        assert rest.server_offset_seconds("EURUSD") == 0
+
+    def test_server_offset_not_connected_raises(self):
+        rest = MT5REST(MT5Terminal())
+        with pytest.raises(ConnectionError, match="not connected"):
+            rest.server_offset_seconds("EURUSD")
 
     def test_rate_limit_exhaust_raises(self, fake_mt5):
         cfg = MT5Config(rate_limit_rate=1.0, rate_limit_burst=1, _env_file=None)
-        term = MT5Terminal(mt5_config=cfg)
-        term._mt5 = fake_mt5
-        term._connected = True
+        rest = _connected_rest(fake_mt5, cfg)
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(minutes=1)
-        term.copy_rates_range("EURUSD", 1, start, end)
+        rest.copy_rates_range("EURUSD", 1, start, end)
         with pytest.raises(RateLimitError):
-            term.copy_rates_range("EURUSD", 1, start, end)
+            rest.copy_rates_range("EURUSD", 1, start, end)
 
     def test_rate_limit_refills_after_wait(self, fake_mt5):
         cfg = MT5Config(rate_limit_rate=100.0, rate_limit_burst=1, _env_file=None)
-        term = MT5Terminal(mt5_config=cfg)
-        term._mt5 = fake_mt5
-        term._connected = True
+        rest = _connected_rest(fake_mt5, cfg)
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(minutes=1)
-        term.copy_rates_range("EURUSD", 1, start, end)
+        rest.copy_rates_range("EURUSD", 1, start, end)
         time.sleep(0.05)
-        assert term.copy_rates_range("EURUSD", 1, start, end) is not None
+        assert rest.copy_rates_range("EURUSD", 1, start, end) is not None
 
     def test_calc_modes_resolved_from_module(self, fake_mt5):
         fake_mt5.SYMBOL_CALC_MODE_FUTURES = 2
         fake_mt5.SYMBOL_CALC_MODE_EXCH_FUTURES = 33
         fake_mt5.SYMBOL_CALC_MODE_FOREX = 0
-        term = MT5Terminal()
-        term._mt5 = fake_mt5
-        assert term.futures_calc_modes() == frozenset({2, 33})
-        assert term.forex_calc_modes() == frozenset({0})
+        rest = _connected_rest(fake_mt5)
+        assert rest.futures_calc_modes() == frozenset({2, 33})
+        assert rest.forex_calc_modes() == frozenset({0})
 
     def test_calc_modes_empty_when_not_connected(self):
-        term = MT5Terminal()
-        assert term.futures_calc_modes() == frozenset()
-        assert term.forex_calc_modes() == frozenset()
+        rest = MT5REST(MT5Terminal())
+        assert rest.futures_calc_modes() == frozenset()
+        assert rest.forex_calc_modes() == frozenset()
 
 
 # --- terminal.MT5Terminal (live, Windows-gated) -----------------------------
@@ -319,7 +336,8 @@ class TestMT5TerminalReal:
     def test_copy_rates_range_returns_real_bars(self, real_terminal):
         # A window ending at now: MT5 keeps the recent history buffer for M1,
         # but a window ending strictly in the past often comes back empty.
-        raw = real_terminal.copy_rates_range(
+        rest = MT5REST(real_terminal)
+        raw = rest.copy_rates_range(
             "EURUSD",
             1,
             datetime.now(UTC) - timedelta(days=7),
@@ -333,13 +351,14 @@ class TestMT5TerminalReal:
     def test_shutdown_disconnects(self, real_terminal):
         real_terminal.shutdown()
         assert real_terminal.connected is False
+        rest = MT5REST(real_terminal)
         with pytest.raises(ConnectionError):
-            real_terminal.copy_rates_range(
+            rest.copy_rates_range(
                 "EURUSD", 1, datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
             )
 
 
-# --- helper: _as_utc ---------------------------------------------------------
+# --- rest._as_utc ------------------------------------------------------------
 
 
 class TestAsUtc:
@@ -432,6 +451,66 @@ class TestMapOHLCV:
 
     def test_volume_baselines_constant(self):
         assert VOLUME_BASELINES == ("tick_volume", "real_volume")
+
+    def test_raw_fields_versus_mapped_columns(self):
+        """MT5's raw named fields vs. the canonical mapped columns.
+
+        Every raw field is consumed somewhere: time → timestamp, tick_volume →
+        volume (default), real_volume selectable via ``volume=`` or as an
+        opt-in extra; ``spread`` appears only as an opt-in extra.
+        """
+        raw = _make_rates(1)
+        assert list(raw.dtype.names) == [
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "tick_volume",
+            "spread",
+            "real_volume",
+        ]
+        assert list(map_ohlcv(raw).columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+    def test_extras_append_raw_columns(self):
+        out = map_ohlcv(_make_rates(2), extras=("spread", "real_volume"))
+        assert list(out.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "spread",
+            "real_volume",
+        ]
+        assert out["spread"].tolist() == [5, 5]
+        assert out["real_volume"].tolist() == [0, 0]
+
+    def test_extras_works_with_real_volume_baseline(self):
+        """Extras are snapshotted before the baseline rename, so requesting
+        ``real_volume`` as both the baseline and an extra stays consistent."""
+        rates = _make_rates(1)
+        rates["real_volume"][0] = 7
+        out = map_ohlcv(rates, volume="real_volume", extras=("real_volume",))
+        assert out.iloc[0]["volume"] == 7
+        assert out.iloc[0]["real_volume"] == 7
+
+    def test_extras_empty_frame_schema(self):
+        out = map_ohlcv(None, extras=("spread",))
+        assert out.empty
+        assert "spread" in out.columns
+
+    def test_extras_invalid_raises(self):
+        with pytest.raises(ProviderError, match="Invalid extra column"):
+            map_ohlcv(_make_rates(1), extras=("bogus",))
 
 
 # --- mapper.map_instrument (spot vs futures classification) ------------------
@@ -634,9 +713,25 @@ class TestMapFundamentals:
         f = map_fundamentals("EURUSD", info)
         assert f.as_of is None
 
+    def test_as_of_shifts_server_tick_time_to_utc(self):
+        """tick.time is server time; offset_seconds brings it back to true UTC."""
+        info = _symbol_info(name="EURUSD", path="Forex\\EURUSD")
+        tick = SimpleNamespace(time=1717171200)  # 2024-05-31 16:00 server time (GMT+3)
+        f = map_fundamentals("EURUSD", info, tick=tick, offset_seconds=3 * 3600)
+        assert f.as_of == pd.Timestamp("2024-05-31 13:00:00", tz="UTC")
+
     def test_none_info_raises(self):
         with pytest.raises(ProviderError, match="No MT5 symbol info"):
             map_fundamentals("EURUSD", None)
+
+
+def _mark_last_bar_open(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    """Wrap ``add_is_closed`` but force the last bar to be still forming."""
+    from datakodo.ops.validation import add_is_closed
+
+    out = add_is_closed(df, timeframe)
+    out.iloc[-1, out.columns.get_loc("is_closed")] = False
+    return out
 
 
 class TestMT5Adapter:
@@ -655,6 +750,143 @@ class TestMT5Adapter:
         now = datetime.now(UTC)
         with pytest.raises(ConnectionError):
             adapter.fetch_ohlcv("EURUSD", "1h", now, now)
+
+    def _connected_adapter(self, fake_mt5) -> MT5Adapter:
+        adapter = MT5Adapter()
+        adapter.connect()
+        return adapter
+
+    def _fetch(self, fake_mt5, *, columns, info=None, include_live=False, output_format=None):
+        if info is not None:
+            fake_mt5.info = info
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        return adapter.fetch_ohlcv(
+            "EURUSD",
+            "1h",
+            start,
+            start + timedelta(days=2),
+            columns=columns,
+            include_live=include_live,
+            output_format=output_format,
+        )
+
+    def test_fetch_ohlcv_basic_columns(self, fake_mt5):
+        df = self._fetch(fake_mt5, columns="basic")
+        assert list(df.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
+        ]
+        assert len(df) == 2880  # fake module emits 1 bar per minute over 2 days
+
+    def test_fetch_ohlcv_all_adds_session_for_forex(self, fake_mt5):
+        df = self._fetch(fake_mt5, columns="all")
+        assert list(df.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
+            "session",
+            "spread",
+            "real_volume",
+        ]
+        assert set(df["session"]) == {"regular"}
+
+    def test_fetch_ohlcv_all_exposes_raw_extras(self, fake_mt5):
+        df = self._fetch(fake_mt5, columns="all")
+        assert df["spread"].iloc[0] == 5
+        assert df["real_volume"].iloc[0] == 0  # fake rows carry real_volume=0
+
+    def test_fetch_ohlcv_explicit_session_forex(self, fake_mt5):
+        df = self._fetch(fake_mt5, columns=["session"])
+        assert "session" in df.columns
+        assert "is_closed" in df.columns
+
+    def test_fetch_ohlcv_explicit_raw_extra(self, fake_mt5):
+        df = self._fetch(fake_mt5, columns=["spread"])
+        assert "spread" in df.columns
+        assert "session" not in df.columns
+
+    def test_fetch_ohlcv_all_metal_no_session(self, fake_mt5):
+        info = _symbol_info(
+            name="XAUUSD",
+            path="Commodities\\XAUUSD",
+            currency_base="XAU",
+            currency_profit="USD",
+        )
+        df = self._fetch(fake_mt5, columns="all", info=info)
+        assert "session" not in df.columns
+        assert "spread" in df.columns and "real_volume" in df.columns
+
+    def test_fetch_ohlcv_explicit_session_metal_raises(self, fake_mt5):
+        info = _symbol_info(
+            name="XAUUSD",
+            path="Commodities\\XAUUSD",
+            currency_base="XAU",
+            currency_profit="USD",
+        )
+        with pytest.raises(ValueError, match="not available"):
+            self._fetch(fake_mt5, columns=["session"], info=info)
+
+    def test_fetch_ohlcv_canonical_but_unoffered_column_raises(self, fake_mt5):
+        with pytest.raises(ValueError, match="not available"):
+            self._fetch(fake_mt5, columns=["vwap"])  # in canonical set, not in MT5
+
+    def test_fetch_ohlcv_unknown_column_raises(self, fake_mt5):
+        with pytest.raises(ValueError, match="Unknown OHLCV column"):
+            self._fetch(fake_mt5, columns=["bogus"])
+
+    def test_adapter_wires_mt5_config_credentials(self, fake_mt5):
+        cfg = MT5Config(login=12345, password="pw", server="Broker-Demo", _env_file=None)
+        adapter = MT5Adapter(mt5_config=cfg)
+        adapter.connect()
+        assert fake_mt5.init_kwargs.get("login") == 12345
+        assert fake_mt5.init_kwargs.get("password") == "pw"
+        assert fake_mt5.init_kwargs.get("server") == "Broker-Demo"
+
+    def test_fetch_ohlcv_invalid_timeframe_raises(self):
+        adapter = MT5Adapter()
+        now = datetime.now(UTC)
+        with pytest.raises(InvalidTimeframeError):
+            adapter.fetch_ohlcv("EURUSD", "bogus", now, now)
+
+    def test_fetch_ohlcv_empty_history_raises(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(DataNotAvailableError):
+            adapter.fetch_ohlcv("EURUSD", "1h", start, start)
+
+    def test_fetch_ohlcv_default_drops_forming_bar(self, fake_mt5, monkeypatch):
+        monkeypatch.setattr("datakodo.adapters.mt5.adapter.add_is_closed", _mark_last_bar_open)
+        df = self._fetch(fake_mt5, columns="basic")
+        assert len(df) == 2879  # 2880 bars minus the still-forming one
+        assert df["is_closed"].all()
+
+    def test_fetch_ohlcv_include_live_keeps_forming_bar(self, fake_mt5, monkeypatch):
+        monkeypatch.setattr("datakodo.adapters.mt5.adapter.add_is_closed", _mark_last_bar_open)
+        df = self._fetch(fake_mt5, columns="basic", include_live=True)
+        assert len(df) == 2880
+        assert not df["is_closed"].iloc[-1]
+
+    def test_fetch_ohlcv_output_format_polars(self, fake_mt5):
+        out = self._fetch(fake_mt5, columns="basic", output_format="polars")
+        import polars as pl
+
+        assert isinstance(out, pl.DataFrame)
+
+    def test_fetch_ohlcv_output_format_arrow(self, fake_mt5):
+        out = self._fetch(fake_mt5, columns="basic", output_format="arrow")
+        import pyarrow as pa
+
+        assert isinstance(out, pa.Table)
 
 
 def _demo() -> None:
@@ -681,6 +913,36 @@ def _demo() -> None:
 
     print("\n--- map_ohlcv(None)  [empty canonical schema] ---")
     print(map_ohlcv(None))
+
+    print("\n--- ALL columns MT5 returns, at each layer ---")
+
+    print("\n1) Raw copy_rates_range fields (everything MT5 gives):")
+    print(f"   {list(raw.dtype.names)}")
+
+    print("\n2) Mapped canonical frame (map_ohlcv, default volume=tick_volume):")
+    print(f"   {list(map_ohlcv(raw).columns)}")
+
+    print("\n3) Mapped frame with the other volume baseline:")
+    print(f"   {list(map_ohlcv(raw, volume='real_volume').columns)}")
+
+    print("\n4) fetch_ohlcv columns by selection:")
+    from datakodo.adapters.mt5.adapter import _requests_session
+    from datakodo.adapters.mt5.mapper import MT5_OHLCV_EXTRAS
+    from datakodo.core.schemas import resolve_ohlcv_columns
+    from datakodo.ops.validation import add_is_closed
+
+    for columns in ("basic", "all", ["session"], ["spread", "real_volume"]):
+        available = MT5_OHLCV_EXTRAS + (("session",) if _requests_session(columns) else ())
+        resolved = resolve_ohlcv_columns(columns, available)
+        mapped_extras = tuple(e for e in MT5_OHLCV_EXTRAS if e in resolved)
+        df = map_ohlcv(_make_rates(2), extras=mapped_extras)
+        df = add_is_closed(df, "1h")
+        if "session" in resolved:
+            df = df.assign(session="regular")
+        print(f"   columns={columns!r:<14} -> {df[resolved].columns.tolist()}")
+
+    print("\nNote: tick_volume folds into 'volume' (default baseline);")
+    print("'spread' and 'real_volume' are opt-in extras under columns='all' or a list.")
 
 
 if __name__ == "__main__":

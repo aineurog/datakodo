@@ -27,37 +27,60 @@ logger = logging.getLogger(__name__)
 # is therefore the default; the choice is exposed as an explicit parameter.
 VOLUME_BASELINES = ("tick_volume", "real_volume")
 
+# Extra MT5-only OHLCV columns, opt-in via ``columns`` (design doc sec 3).
+# These mirror raw CopyRates fields that have no home in the canonical base:
+# ``spread`` (quoted spread) and ``real_volume`` (broker-traded volume).
+MT5_OHLCV_EXTRAS = ("spread", "real_volume")
+
 # Metal base currencies MT5 uses for precious metals (quoted in troy ounces).
 _METAL_BASES = ("XAU", "XAG", "XPT", "XPD")
 
 
-def map_ohlcv(raw, volume: str = "tick_volume", offset_seconds: int = 0) -> pd.DataFrame:
+def map_ohlcv(
+    raw,
+    volume: str = "tick_volume",
+    offset_seconds: int = 0,
+    extras: tuple[str, ...] = (),
+) -> pd.DataFrame:
     """Convert raw MT5 rates into a DataFrame of canonical OHLCV rows.
 
     MT5 CopyRates returns a numpy structured array with named columns
     'time', 'open', 'high', 'low', 'close', 'tick_volume', 'spread',
     'real_volume'. Raw ``time`` values are in **server time**; subtracting
-    ``offset_seconds`` (see ``MT5Terminal.server_offset_seconds``) before
+    ``offset_seconds`` (see ``MT5REST.server_offset_seconds``) before
     ``utc=True`` yields true UTC.
 
     ``volume`` selects the canonical ``volume`` baseline:
     - ``"tick_volume"`` (default) — reliable for forex/CFDs.
     - ``"real_volume"`` — broker-traded volume (often 0 for forex).
 
-    Returns the base OHLCV columns only (``timestamp, open, high, low,
-    close, volume``). ``is_closed`` is added by the adapter (design doc
-    sec 3); ``session`` is a per-provider extra for session-based asset
-    classes, added by the adapter under ``columns="all"`` (sec 3/9).
+    ``extras`` appends opt-in MT5-only columns (``MT5_OHLCV_EXTRAS``) that
+    the raw array carries but the canonical base drops, so ``columns="all"``
+    can surface every field MT5 returns (design doc sec 3).
+
+    Returns the base OHLCV columns (``timestamp, open, high, low, close,
+    volume``) plus any requested extras. ``is_closed`` is added by the adapter
+    (design doc sec 3); ``session`` is a per-provider extra for session-based
+    asset classes, added by the adapter under ``columns="all"`` (sec 3/9).
     """
     if volume not in VOLUME_BASELINES:
         raise ProviderError(
             f"Invalid volume baseline {volume!r}; expected one of {VOLUME_BASELINES}"
         )
 
+    base_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+    unknown = [extra for extra in extras if extra not in MT5_OHLCV_EXTRAS]
+    if unknown:
+        raise ProviderError(
+            f"Invalid extra column(s) {unknown}; expected none or one of {MT5_OHLCV_EXTRAS}"
+        )
+
     if raw is None or len(raw) == 0:
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        return pd.DataFrame(columns=base_cols + [e for e in MT5_OHLCV_EXTRAS if e in extras])
 
     df = pd.DataFrame(raw)
+    # Snapshot requested extras before the rename below consumes one baseline.
+    extra_values = {e: df[e].values for e in MT5_OHLCV_EXTRAS if e in extras}
     df = df.rename(
         columns={
             "time": "timestamp",
@@ -68,8 +91,10 @@ def map_ohlcv(raw, volume: str = "tick_volume", offset_seconds: int = 0) -> pd.D
     # Server time → true UTC epoch, then to UTC-aware timestamps.
     df["timestamp"] = pd.to_datetime(df["timestamp"] - offset_seconds, unit="s", utc=True)
 
-    cols = ["timestamp", "open", "high", "low", "close", "volume"]
-    return df[cols]
+    out = df[base_cols].copy()
+    for extra, values in extra_values.items():
+        out[extra] = values
+    return out
 
 
 # --- instrument classification (spot vs futures) -----------------------------
@@ -90,8 +115,8 @@ def map_instrument(
     ``futures_modes`` holds the package's ``SYMBOL_CALC_MODE_*`` integers
     that denote futures contracts and ``forex_modes`` the ones that denote
     spot forex pairs (values differ across builds, so they are resolved from
-    the live module — see ``MT5Terminal.futures_calc_modes`` and
-    ``MT5Terminal.forex_calc_modes``).
+    the live module — see ``MT5REST.futures_calc_modes`` and
+    ``MT5REST.forex_calc_modes``).
 
     ``market_type`` is an optional user hint (``"spot"``/``"futures"``/...).
     When given it is validated against the detected classification: a
@@ -126,44 +151,23 @@ def map_instrument(
         )
     elif calc_mode in forex_modes or path.startswith("forex"):
         instrument = _as_forex(symbol, info, exchange, currency)
-    elif "crypto" in path or "coin" in path:
-        instrument = Instrument(
-            symbol=symbol,
-            provider_symbol=symbol,
-            exchange=exchange,
-            currency=currency,
-            asset_class=AssetClass.CRYPTO,
-            instrument_type=InstrumentType.SPOT,
-        )
-    elif "indices" in path or "index" in path:
-        instrument = Instrument(
-            symbol=symbol,
-            provider_symbol=symbol,
-            exchange=exchange,
-            currency=currency,
-            asset_class=AssetClass.INDEX,
-            instrument_type=InstrumentType.CFD,
-        )
-    elif "equit" in path or "stocks" in path or "shares" in path:
-        instrument = Instrument(
-            symbol=symbol,
-            provider_symbol=symbol,
-            exchange=exchange,
-            currency=currency,
-            asset_class=AssetClass.EQUITY,
-            instrument_type=InstrumentType.SPOT,
-        )
     else:
-        # Commodities (energy, agriculture), CFDs, and best-effort fallbacks.
-        # There is no COMMODITY asset class in the canonical enum yet, so the
-        # closest index-like bucket is used; ``CFD`` is the instrument type.
+        # Crypto, indices, equities, bonds, and best-effort fallbacks all
+        # resolve through the same classifier (no divergent path checks).
+        # ``SPOT`` for exchange-traded classes, ``CFD`` otherwise; ``CFD`` is
+        # the instrument type for anything index-like (design doc sec 4).
+        asset_class = _classify_asset(base, path)
         instrument = Instrument(
             symbol=symbol,
             provider_symbol=symbol,
             exchange=exchange,
             currency=currency,
-            asset_class=AssetClass.INDEX,
-            instrument_type=InstrumentType.CFD,
+            asset_class=asset_class,
+            instrument_type=(
+                InstrumentType.SPOT
+                if asset_class in (AssetClass.EQUITY, AssetClass.CRYPTO)
+                else InstrumentType.CFD
+            ),
         )
 
     if market_type:
@@ -266,20 +270,24 @@ def map_fundamentals(
     tick=None,
     futures_modes: frozenset[int] = frozenset(),
     forex_modes: frozenset[int] = frozenset((0, 5)),
+    offset_seconds: int = 0,
 ) -> Fundamentals:
     """Build canonical ``Fundamentals`` from ``symbol_info`` (+ ``tick``).
 
     MT5 exposes reference data through ``SymbolInfo`` (currencies, description,
     classification). Classification is delegated to ``map_instrument`` so the
     asset class / instrument type stay consistent with ``MT5Adapter.instrument()``.
-    ``as_of`` is the tick time when available. MT5 has no live-price field on
-    the canonical ``Fundamentals`` base for forex/metal classes yet, so price
-    stats stay out of scope here (design doc sec 3).
+    ``as_of`` is the tick time converted to true UTC: ``tick.time`` is **server
+    time**, so ``offset_seconds`` (see ``MT5REST.server_offset_seconds``) is
+    subtracted first. MT5 has no live-price field on the canonical
+    ``Fundamentals`` base for forex/metal classes yet, so price stats stay out
+    of scope here (design doc sec 3).
     """
     if info is None:
         raise ProviderError(f"No MT5 symbol info for {symbol!r}.")
     inst = map_instrument(symbol, info, futures_modes=futures_modes, forex_modes=forex_modes)
     tick = tick or {}
+    tick_time = getattr(tick, "time", None)
     return Fundamentals(
         symbol=symbol,
         name=getattr(info, "description", "") or symbol,
@@ -287,7 +295,7 @@ def map_fundamentals(
         instrument_type=inst.instrument_type,
         currency=inst.currency,
         exchange=inst.exchange,
-        as_of=_epoch_to_utc(getattr(tick, "time", None)),
+        as_of=_epoch_to_utc(tick_time - offset_seconds) if tick_time else None,
     )
 
 
