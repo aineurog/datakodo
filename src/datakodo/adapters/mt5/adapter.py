@@ -7,8 +7,10 @@ import pandas as pd
 
 from datakodo.adapters.mt5.mapper import map_ohlcv
 from datakodo.adapters.mt5.terminal import MT5Terminal
+from datakodo.core.enums import Timeframe
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.core.timeframe import MT5_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -61,5 +63,6 @@ class MT5Adapter(AdapterInterface):
         **kwargs,
     ) -> pd.DataFrame:
         symbol = symbol_of(symbol)
-        raw = self._terminal.copy_rates_range(symbol, timeframe, start, end)
+        mt5_tf = MT5_MAP[Timeframe(timeframe)]
+        raw = self._terminal.copy_rates_range(symbol, mt5_tf, start, end)
         return map_ohlcv(raw)
