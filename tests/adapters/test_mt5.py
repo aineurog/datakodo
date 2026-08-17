@@ -107,12 +107,14 @@ class FakeMT5Module:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, int, datetime, datetime]] = []
+        self.select_calls: list[tuple[str, bool]] = []
         self.initialize_ok = True
         self.error = (0, "ok")
         self.account = SimpleNamespace(login=12345, server="Broker-Demo")
         self.tick = SimpleNamespace(time=int(time.time()))
         self.info = _symbol_info()  # EURUSD-like forex by default
         self.shutdown_called = False
+        self.step = 60  # seconds between fabricated bars
 
     def initialize(self, *args, **kwargs) -> bool:
         self.init_args = args
@@ -131,11 +133,15 @@ class FakeMT5Module:
     def symbol_info_tick(self, symbol):
         return self.tick
 
+    def symbol_select(self, symbol, enable=True):
+        self.select_calls.append((symbol, enable))
+        return True
+
     def copy_rates_range(self, symbol, timeframe, start, end):
         self.calls.append((symbol, timeframe, start, end))
         if end <= start:
             return None
-        times = range(int(start.timestamp()), int(end.timestamp()), 60)
+        times = range(int(start.timestamp()), int(end.timestamp()), self.step)
         rows = np.array(
             [(t, 1.10, 1.11, 1.09, 1.105, 100 + t % 7, 5, 0) for t in times],
             dtype=_RAW_DTYPE,
@@ -784,6 +790,16 @@ class TestMT5Adapter:
         ]
         assert len(df) == 2880  # fake module emits 1 bar per minute over 2 days
 
+    def test_fetch_ohlcv_selects_symbol_before_rates(self, fake_mt5):
+        """The symbol is added to MarketWatch first, so MT5 downloads its history."""
+        self._fetch(fake_mt5, columns="basic")
+        assert fake_mt5.select_calls and fake_mt5.select_calls[0] == ("EURUSD", True)
+        assert len(fake_mt5.calls) > 0
+        # selection must happen before the first history request
+        first_select = fake_mt5.select_calls[0]
+        first_request = fake_mt5.calls[0]
+        assert first_request[0] == first_select[0]
+
     def test_fetch_ohlcv_all_adds_session_for_forex(self, fake_mt5):
         df = self._fetch(fake_mt5, columns="all")
         assert list(df.columns) == [
@@ -863,6 +879,33 @@ class TestMT5Adapter:
         start = datetime(2026, 1, 1, tzinfo=UTC)
         with pytest.raises(DataNotAvailableError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, start)
+
+    def test_fetch_ohlcv_paginates_large_range(self, fake_mt5):
+        """Ranges wider than ``max_bars`` are chunked and stitched (sec 12).
+
+        The fake emits one hourly bar per hour; a 2-day ``1h`` window is 48
+        bars, so ``max_bars=24`` splits it into 2 terminal calls that get
+        concatenated, deduplicated, and re-sorted into a single frame.
+        """
+        fake_mt5.step = 3600  # one bar per hour
+        cfg = MT5Config(max_bars=24, _env_file=None)
+        adapter = MT5Adapter(mt5_config=cfg)
+        adapter.connect()
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2))
+        assert len(fake_mt5.calls) == 2  # 48 hourly bars / 24-bar chunks
+        assert len(df) == 48
+        assert df["timestamp"].is_monotonic_increasing
+        assert df["timestamp"].is_unique
+
+    def test_fetch_ohlcv_paginate_stays_rate_limited(self, fake_mt5):
+        """Chunked fetches still draw from the token bucket (sec 17)."""
+        cfg = MT5Config(max_bars=24, rate_limit_rate=1.0, rate_limit_burst=1, _env_file=None)
+        adapter = MT5Adapter(mt5_config=cfg)
+        adapter.connect()
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(RateLimitError):
+            adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2))
 
     def test_fetch_ohlcv_default_drops_forming_bar(self, fake_mt5, monkeypatch):
         monkeypatch.setattr("datakodo.adapters.mt5.adapter.add_is_closed", _mark_last_bar_open)

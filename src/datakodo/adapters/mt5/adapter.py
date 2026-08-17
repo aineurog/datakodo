@@ -17,6 +17,7 @@ from datakodo.core.interfaces import AdapterInterface, symbol_of
 from datakodo.core.schemas import resolve_ohlcv_columns
 from datakodo.core.timeframe import MT5_MAP
 from datakodo.ops.output import to_output_format
+from datakodo.ops.pagination import paginate
 from datakodo.ops.validation import add_is_closed, validate_ohlcv
 
 logger = logging.getLogger(__name__)
@@ -95,20 +96,40 @@ class MT5Adapter(AdapterInterface):
         ``output_format`` selects the user-facing representation (design doc
         sec 13): pandas (default), polars, or arrow — a per-call override of
         ``Config.output_format``.
+
+        Ranges wider than ``MT5Config.max_bars`` bars are auto-paginated and
+        stitched by ``ops.pagination.paginate`` (design doc sec 12), so a
+        single call transparently covers ranges larger than the terminal's
+        loaded chart history.
         """
         symbol = symbol_of(symbol)
         mt5_tf = _to_mt5_timeframe(timeframe)
-        raw = self._rest.copy_rates_range(symbol, mt5_tf, start, end)
+        tf = Timeframe(timeframe)
+        # MT5 only buffers history for symbols visible in MarketWatch. Selecting
+        # the symbol first forces the terminal to download/load its bars, so a
+        # symbol whose chart was never opened still returns data.
+        self._rest.symbol_select(symbol, True)
+        offset_seconds = self._rest.server_offset_seconds(symbol)
+
+        if start >= end:
+            raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
 
         session_extras = self._session_extras(symbol) if _requests_session(columns) else ()
         available = MT5_OHLCV_EXTRAS + session_extras
         resolved = resolve_ohlcv_columns(columns, available)
-
         mapped_extras = tuple(extra for extra in MT5_OHLCV_EXTRAS if extra in resolved)
-        df = map_ohlcv(
-            raw,
-            offset_seconds=self._rest.server_offset_seconds(symbol),
-            extras=mapped_extras,
+
+        def _fetch_chunk(chunk_symbol: str, chunk_start: datetime, chunk_end: datetime) -> Any:
+            raw = self._rest.copy_rates_range(chunk_symbol, mt5_tf, chunk_start, chunk_end)
+            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=mapped_extras)
+
+        df = paginate(
+            _fetch_chunk,
+            symbol,
+            tf,
+            start,
+            end,
+            max_per_request=self._terminal.config.max_bars,
         )
 
         if df.empty:

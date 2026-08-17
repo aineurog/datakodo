@@ -41,6 +41,12 @@ class MT5Config(BaseSettings):
     terminal, so this is a conservative throttle on data requests."""
     rate_limit_burst: int = 10
     """MT5 token-bucket burst capacity."""
+    max_bars: int = 1000
+    """Bar cap per ``copy_rates_range`` request. MT5 returns at most what the
+    symbol's chart has loaded ('Max. bars in chart'); wide ranges are chunked
+    into ``max_bars`` slices and stitched by ``ops.pagination.paginate``
+    (design doc sec 12). Lower the default only if your terminal loads fewer
+    bars than this."""
     market_type: str = "forex"
     """Default MT5 market classification: 'forex', 'cfd', 'index', or 'metal'.
     Used to select the canonical ``Instrument`` type when no symbol-specific
