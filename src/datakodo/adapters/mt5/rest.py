@@ -9,11 +9,18 @@ poll via ``symbol_info_tick``.
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from datakodo.adapters.mt5.terminal import MT5Terminal
-from datakodo.core.exceptions import ConnectionError, RateLimitError, SymbolNotFoundError
+from datakodo.core.config import Config
+from datakodo.core.exceptions import (
+    ConnectionError,
+    RateLimitError,
+    RetriesExhaustedError,
+    SymbolNotFoundError,
+)
 from datakodo.ratelimit.limiter import TokenBucket
 
 logger = logging.getLogger(__name__)
@@ -39,11 +46,18 @@ class MT5REST:
     Owns nothing the terminal owns: the session, the module handle, and the
     connection flag all live on the :class:`MT5Terminal` passed in, so a
     ``rest``/``terminal`` pair cannot drift apart. Requests are gated by a
-    token bucket (design doc sec 17; see ``MT5Config.rate_limit_*``).
+    token bucket (design doc sec 17; see ``MT5Config.rate_limit_*``) and
+    rate-limit hits retry with exponential backoff governed by
+    ``Config.max_retries`` / ``Config.retry_base_delay`` (design doc sec 16).
     """
 
-    def __init__(self, terminal: MT5Terminal) -> None:
+    def __init__(
+        self,
+        terminal: MT5Terminal,
+        config: Config | None = None,
+    ) -> None:
         self._terminal = terminal
+        self._config = config or Config()
         self._limiter = TokenBucket(
             rate=terminal.config.rate_limit_rate,
             burst=terminal.config.rate_limit_burst,
@@ -75,6 +89,42 @@ class MT5REST:
                 retry_after=retry_after,
             )
         return self._mt5
+
+    def _with_retry(self, weight: int, fn: Callable[[Any], Any]) -> Any:
+        """Run ``fn(module)`` under the rate gate with retry/backoff.
+
+        MT5's terminal is local, so an empty token bucket is a transient
+        condition: the request backs off and retries up to ``Config.max_retries``
+        times with exponential delay (``Config.retry_base_delay``). When the
+        retry budget is exhausted, raises ``RetriesExhaustedError`` (design doc
+        sec 16/17).
+        """
+        last_exc: Exception | None = None
+        retried = False
+        max_retries = self._config.max_retries
+        base_delay = self._config.retry_base_delay
+        for attempt in range(max_retries + 1):
+            try:
+                return fn(self._ready(weight))
+            except RateLimitError as exc:
+                if attempt >= max_retries:
+                    if retried:
+                        break
+                    raise exc
+                delay = base_delay * (2**attempt)
+                retry_after = max(delay, exc.retry_after)
+                logger.info(
+                    "MT5 rate-limited (attempt %d/%d), retrying in %.1fs",
+                    attempt + 1,
+                    max_retries + 1,
+                    retry_after,
+                )
+                time.sleep(retry_after)
+                last_exc = exc
+                retried = True
+        raise RetriesExhaustedError(
+            f"MT5 request failed after {max_retries + 1} attempts."
+        ) from last_exc
 
     def server_offset_seconds(self, symbol: str) -> int:
         """Difference between the server clock and UTC, in seconds.
@@ -112,15 +162,19 @@ class MT5REST:
         in the requested window. A symbol unknown to the terminal raises
         ``SymbolNotFoundError`` (via ``last_error()``).
         """
-        mt5 = self._ready(1)
         start_utc = _as_utc(start)
         end_utc = _as_utc(end)
-        if offset_seconds is None:
-            offset_seconds = self.server_offset_seconds(symbol)
-        shift = timedelta(seconds=offset_seconds)
-        rates = mt5.copy_rates_range(symbol, timeframe, start_utc + shift, end_utc + shift)
+
+        def _copy(mt5: Any) -> Any:
+            offset = offset_seconds
+            if offset is None:
+                offset = self.server_offset_seconds(symbol)
+            shift = timedelta(seconds=offset)
+            return mt5.copy_rates_range(symbol, timeframe, start_utc + shift, end_utc + shift)
+
+        rates = self._with_retry(1, _copy)
         if rates is None or len(rates) == 0:
-            code, description = mt5.last_error()
+            code, description = self._ready().last_error()
             if self._is_unknown_symbol(code, description):
                 raise SymbolNotFoundError(
                     f"Symbol {symbol!r} not found on MT5: {description or f'code {code}'}"
@@ -150,7 +204,7 @@ class MT5REST:
         contract/tick sizes, currencies, and expiry — the fields used to
         classify a symbol as spot, futures, CFD, etc.
         """
-        return self._ready(1).symbol_info(symbol)
+        return self._with_retry(1, lambda mt5: mt5.symbol_info(symbol))
 
     def symbol_select(self, symbol: str, enable: bool = True) -> bool:
         """Add/remove ``symbol`` from the MarketWatch window, returning success.
@@ -159,7 +213,7 @@ class MT5REST:
         Calling ``symbol_select(symbol, True)`` before reading data ensures
         history is available for the symbol.
         """
-        return bool(self._ready(1).symbol_select(symbol, enable))
+        return bool(self._with_retry(1, lambda mt5: mt5.symbol_select(symbol, enable)))
 
     def ensure_symbol_known(self, symbol: str) -> None:
         """Select *symbol* in MarketWatch, raising ``SymbolNotFoundError`` when
@@ -195,7 +249,7 @@ class MT5REST:
         — the live-price inputs used for fundamentals. This is the closest
         MT5 gets to streaming: a blocking poll, not a push feed.
         """
-        return self._ready(1).symbol_info_tick(symbol)
+        return self._with_retry(1, lambda mt5: mt5.symbol_info_tick(symbol))
 
     def futures_calc_modes(self) -> frozenset[int]:
         """``trade_calc_mode`` integers that identify futures contracts.

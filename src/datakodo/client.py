@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # (e.g. running from a source checkout). Entry points may register more.
 _BUILTINS: dict[str, str] = {
     "binance": "datakodo.adapters.binance:BinanceAdapter",
+    "mt5": "datakodo.adapters.mt5:MT5Adapter",
 }
 
 _ENTRY_POINT_GROUP = "datakodo.adapters"

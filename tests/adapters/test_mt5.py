@@ -19,6 +19,7 @@ from datakodo.adapters.mt5.mapper import (
 )
 from datakodo.adapters.mt5.rest import MT5REST, _as_utc
 from datakodo.adapters.mt5.terminal import MT5Terminal
+from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import (
     ConnectionError,
@@ -27,6 +28,7 @@ from datakodo.core.exceptions import (
     NotSupportedError,
     ProviderError,
     RateLimitError,
+    RetriesExhaustedError,
     SymbolNotFoundError,
 )
 
@@ -215,11 +217,15 @@ class TestMT5TerminalMocked:
 # --- rest.MT5REST (mocked) ---------------------------------------------------
 
 
-def _connected_rest(fake_mt5, cfg: MT5Config | None = None) -> MT5REST:
+def _connected_rest(
+    fake_mt5,
+    cfg: MT5Config | None = None,
+    config: Config | None = None,
+) -> MT5REST:
     """A connected terminal + MT5REST pair over the fake module."""
     term = MT5Terminal(mt5_config=cfg)
     term.initialize()
-    return MT5REST(term)
+    return MT5REST(term, config=config)
 
 
 class TestMT5RESTMocked:
@@ -296,18 +302,40 @@ class TestMT5RESTMocked:
         with pytest.raises(ConnectionError, match="not connected"):
             rest.server_offset_seconds("EURUSD")
 
-    def test_rate_limit_exhaust_raises(self, fake_mt5):
+    def test_rate_limit_no_retries_raises_rate_limit(self, fake_mt5):
+        """With retries disabled, an empty bucket raises immediately."""
         cfg = MT5Config(rate_limit_rate=1.0, rate_limit_burst=1, _env_file=None)
-        rest = _connected_rest(fake_mt5, cfg)
+        rest = _connected_rest(fake_mt5, cfg, config=Config(max_retries=0))
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(minutes=1)
         rest.copy_rates_range("EURUSD", 1, start, end)
         with pytest.raises(RateLimitError):
             rest.copy_rates_range("EURUSD", 1, start, end)
 
+    def test_rate_limit_retries_then_succeeds(self, fake_mt5):
+        """A full bucket refills and the request succeeds via backoff (sec 16)."""
+        cfg = MT5Config(rate_limit_rate=100.0, rate_limit_burst=1, _env_file=None)
+        rest = _connected_rest(fake_mt5, cfg, config=Config(retry_base_delay=0.01))
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = start + timedelta(minutes=1)
+        rest.copy_rates_range("EURUSD", 1, start, end)
+        # Second call is rate-limited at first, then retried to success.
+        assert rest.copy_rates_range("EURUSD", 1, start, end) is not None
+
+    def test_rate_limit_retries_exhausted_raises(self, fake_mt5, monkeypatch):
+        """Backoff that never gets a token raises RetriesExhaustedError."""
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
+        cfg = MT5Config(rate_limit_rate=1.0, rate_limit_burst=1, _env_file=None)
+        rest = _connected_rest(fake_mt5, cfg, config=Config(max_retries=1))
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = start + timedelta(minutes=1)
+        rest.copy_rates_range("EURUSD", 1, start, end)
+        with pytest.raises(RetriesExhaustedError):
+            rest.copy_rates_range("EURUSD", 1, start, end)
+
     def test_rate_limit_refills_after_wait(self, fake_mt5):
         cfg = MT5Config(rate_limit_rate=100.0, rate_limit_burst=1, _env_file=None)
-        rest = _connected_rest(fake_mt5, cfg)
+        rest = _connected_rest(fake_mt5, cfg, config=Config(max_retries=0))
         start = datetime(2026, 1, 1, tzinfo=UTC)
         end = start + timedelta(minutes=1)
         rest.copy_rates_range("EURUSD", 1, start, end)
@@ -971,13 +999,19 @@ class TestMT5Adapter:
         assert df["timestamp"].is_monotonic_increasing
         assert df["timestamp"].is_unique
 
-    def test_fetch_ohlcv_paginate_stays_rate_limited(self, fake_mt5):
-        """Chunked fetches still draw from the token bucket (sec 17)."""
+    def test_fetch_ohlcv_paginate_stays_rate_limited(self, fake_mt5, monkeypatch):
+        """Chunked fetches still draw from the token bucket (sec 17).
+
+        The symbol-select consumes the only token; the first chunk's request
+        can never refill it (real-time sleep is stubbed), so the retry budget
+        exhausts and surfaces as ``RetriesExhaustedError``.
+        """
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
         cfg = MT5Config(max_bars=24, rate_limit_rate=1.0, rate_limit_burst=1, _env_file=None)
         adapter = MT5Adapter(mt5_config=cfg)
         adapter.connect()
         start = datetime(2026, 1, 1, tzinfo=UTC)
-        with pytest.raises(RateLimitError):
+        with pytest.raises(RetriesExhaustedError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2))
 
     def test_fetch_ohlcv_default_drops_forming_bar(self, fake_mt5, monkeypatch):
@@ -1143,6 +1177,100 @@ def test_fetch_ohlcv_stock_adapter_never_resamples(fake_mt5):
     """The real MT5 adapter offers every canonical timeframe natively."""
     adapter = MT5Adapter()
     assert adapter.native_timeframes == tuple(Timeframe)
+
+
+# --- Gap detection (design doc sec 18) -------------------------------------
+
+
+class TestGapDetection:
+    def test_detect_gaps_finds_missing_candles(self):
+        """Gaps are flagged with a correct missing-candle count."""
+        from datakodo.ops.validation import detect_gaps
+
+        # 1h data with a 3-hour gap (2 missing candles)
+        timestamps = [1717171200, 1717174800, 1717185600, 1717189200]  # 00, 01, 04, 05
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
+                "open": [1.0] * 4,
+                "high": [1.1] * 4,
+                "low": [0.9] * 4,
+                "close": [1.05] * 4,
+                "volume": [100] * 4,
+            }
+        )
+        gaps = detect_gaps(df, "1h")
+        assert len(gaps) == 1
+        assert int(gaps["gap_missing"].iloc[0]) == 2
+        assert gaps["timestamp"].iloc[0] == pd.Timestamp(1717174800, unit="s", tz="UTC")
+
+    def test_detect_gaps_simple_full_flow(self):
+        """Raw MT5 rates with a gap -> map_ohlcv -> detect_gaps."""
+        from datakodo.ops.validation import detect_gaps
+
+        # 4 hourly MT5 bars, but skip the 02:00 bar (1 missing candle)
+        raw = np.array(
+            [
+                (1717171200, 1.10, 1.11, 1.09, 1.10, 100, 5, 0),  # 00:00
+                (1717174800, 1.10, 1.11, 1.09, 1.10, 100, 5, 0),  # 01:00
+                (1717182000, 1.10, 1.11, 1.09, 1.10, 100, 5, 0),  # 03:00 (02:00 missing)
+                (1717185600, 1.10, 1.11, 1.09, 1.10, 100, 5, 0),  # 04:00
+            ],
+            dtype=_RAW_DTYPE,
+        )
+        gaps = detect_gaps(map_ohlcv(raw), "1h")
+        assert len(gaps) == 1
+        assert gaps["timestamp"].iloc[0] == pd.Timestamp(1717174800, unit="s", tz="UTC")
+        assert int(gaps["gap_missing"].iloc[0]) == 1
+
+    def test_detect_gaps_no_gaps_returns_empty(self):
+        """Contiguous data returns an empty DataFrame."""
+        from datakodo.ops.validation import detect_gaps
+
+        timestamps = [1717171200, 1717174800, 1717178400, 1717182000]  # contiguous 1h
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(timestamps, unit="s", utc=True),
+                "open": [1.0] * 4,
+                "high": [1.1] * 4,
+                "low": [0.9] * 4,
+                "close": [1.05] * 4,
+                "volume": [100] * 4,
+            }
+        )
+        assert detect_gaps(df, "1h").empty
+
+    def test_fetch_ohlcv_logs_warning_on_gap(self, fake_mt5, caplog):
+        """Adapter logs a warning when fetched bars skip a candle (sec 18)."""
+
+        def gappy_rates(symbol, timeframe, start, end):
+            times = list(range(int(start.timestamp()), int(end.timestamp()), 3600))
+            times.pop(2)  # drop the 02:00 bar -> 1 missing candle
+            return np.array(
+                [(t, 1.10, 1.11, 1.09, 1.105, 100 + t % 7, 5, 0) for t in times],
+                dtype=_RAW_DTYPE,
+            )
+
+        fake_mt5.step = 3600
+        fake_mt5.copy_rates_range = gappy_rates
+        adapter = MT5Adapter()
+        adapter.connect()
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with caplog.at_level(logging.WARNING):
+            df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=1))
+        assert not df.empty
+        assert any("Gap detected in EURUSD" in r.getMessage() for r in caplog.records)
+
+    def test_fetch_ohlcv_no_gaps_log_no_warning(self, fake_mt5, caplog):
+        """Contiguous bars produce no gap warning."""
+        fake_mt5.step = 3600
+        adapter = MT5Adapter()
+        adapter.connect()
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with caplog.at_level(logging.WARNING):
+            df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=1))
+        assert not df.empty
+        assert not any("Gap detected" in r.getMessage() for r in caplog.records)
 
 
 def _demo() -> None:

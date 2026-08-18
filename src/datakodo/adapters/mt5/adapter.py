@@ -28,7 +28,7 @@ from datakodo.core.timeframe import MT5_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
 from datakodo.ops.resample import pick_source_timeframe, resample
-from datakodo.ops.validation import add_is_closed, validate_ohlcv
+from datakodo.ops.validation import add_is_closed, detect_gaps, validate_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class MT5Adapter(AdapterInterface):
     ) -> None:
         self._config = config or Config()
         self._terminal = MT5Terminal(terminal_path, mt5_config)
-        self._rest = MT5REST(self._terminal)
+        self._rest = MT5REST(self._terminal, config=self._config)
 
     def connect(self) -> None:
         """Initialize the MT5 terminal connection."""
@@ -187,6 +187,7 @@ class MT5Adapter(AdapterInterface):
             )
             df = resample(source, tf)
             validate_ohlcv(df)
+            self._log_gaps(symbol, timeframe, start, end, df)
             available = ()
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s",
@@ -256,8 +257,26 @@ class MT5Adapter(AdapterInterface):
             raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
 
         validate_ohlcv(df)
+        self._log_gaps(symbol, timeframe, start, end, df)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
         return df, available
+
+    def _log_gaps(
+        self, symbol: str, timeframe: str, start: datetime, end: datetime, df: Any
+    ) -> None:
+        """Warn when the fetched frame has missing candles (design doc sec 18)."""
+        gaps = detect_gaps(df, timeframe)
+        if not gaps.empty:
+            missing = int(gaps["gap_missing"].sum())
+            logger.warning(
+                "Gap detected in %s %s [%s \u2192 %s]: %d gap(s), %d missing candle(s)",
+                symbol,
+                timeframe,
+                start.isoformat(),
+                end.isoformat(),
+                len(gaps),
+                missing,
+            )
 
     def _log_resample(self, requested: str, source: str) -> None:
         """Warn (or log quietly) that ``requested`` is derived by resampling."""
