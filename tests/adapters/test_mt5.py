@@ -25,7 +25,6 @@ from datakodo.core.exceptions import (
     ConnectionError,
     DataNotAvailableError,
     InvalidTimeframeError,
-    NotSupportedError,
     ProviderError,
     RateLimitError,
     RetriesExhaustedError,
@@ -117,7 +116,13 @@ class FakeMT5Module:
         self.account = SimpleNamespace(login=12345, server="Broker-Demo")
         self.tick = SimpleNamespace(time=int(time.time()))
         self.info = _symbol_info()  # EURUSD-like forex by default
+        self.symbols = _symbol_catalog()  # the terminal's full universe
         self.shutdown_called = False
+        # Module-level SYMBOL_CALC_MODE_* constants (values vary by build).
+        self.SYMBOL_CALC_MODE_FOREX = 0
+        self.SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE = 5
+        self.SYMBOL_CALC_MODE_FUTURES = 1
+        self.SYMBOL_CALC_MODE_EXCH_FUTURES = 2
         self.step = 60  # seconds between fabricated bars
         self.no_history = False  # when True, copy_rates_range returns None
         self.symbol_select_ok = True
@@ -138,6 +143,9 @@ class FakeMT5Module:
 
     def symbol_info_tick(self, symbol):
         return self.tick
+
+    def symbols_get(self, group=""):
+        return self.symbols
 
     def symbol_select(self, symbol, enable=True):
         self.select_calls.append((symbol, enable))
@@ -346,9 +354,10 @@ class TestMT5RESTMocked:
         fake_mt5.SYMBOL_CALC_MODE_FUTURES = 2
         fake_mt5.SYMBOL_CALC_MODE_EXCH_FUTURES = 33
         fake_mt5.SYMBOL_CALC_MODE_FOREX = 0
+        fake_mt5.SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE = 5
         rest = _connected_rest(fake_mt5)
         assert rest.futures_calc_modes() == frozenset({2, 33})
-        assert rest.forex_calc_modes() == frozenset({0})
+        assert rest.forex_calc_modes() == frozenset({0, 5})
 
     def test_calc_modes_empty_when_not_connected(self):
         rest = MT5REST(MT5Terminal())
@@ -599,6 +608,41 @@ def _symbol_info(**overrides) -> SimpleNamespace:
     )
     fields.update(overrides)
     return SimpleNamespace(**fields)
+
+
+def _symbol_catalog() -> list[SimpleNamespace]:
+    """A small mock terminal universe: forex, metal, and a futures contract."""
+    return [
+        _symbol_info(),
+        _symbol_info(
+            name="GBPUSD",
+            description="British Pound vs US Dollar",
+            currency_base="GBP",
+        ),
+        _symbol_info(
+            name="XAUUSD",
+            path="Metals\\XAUUSD",
+            description="Gold vs US Dollar",
+            currency_base="XAU",
+            digits=2,
+            point=0.01,
+            trade_contract_size=100.0,
+        ),
+        _symbol_info(
+            name="DXY_U6",
+            path="Futures\\DXY_U6",
+            description="US Dollar Index",
+            exchange="CME",
+            currency_base="USD",
+            digits=3,
+            point=0.005,
+            trade_calc_mode=1,
+            trade_contract_size=1000.0,
+            trade_tick_size=0.005,
+            trade_tick_value=5.0,
+            expiration_time=1789516800,
+        ),
+    ]
 
 
 class TestMapInstrument:
@@ -1118,11 +1162,96 @@ class TestMT5Adapter:
         with pytest.raises(ConnectionError):
             adapter.fetch_fundamentals("EURUSD")
 
-    def test_search_instruments_not_supported(self):
-        """MT5 has no cheap symbol-list endpoint; the default raises (sec 2)."""
+    def test_fetch_ohlcv_terminal_out_of_memory_is_provider_error(self, fake_mt5):
+        """Non-unknown select failures (e.g. out of memory) are not hidden as
+        SymbolNotFoundError — they surface the terminal's real message (sec 16)."""
+        fake_mt5.error = (0, "Terminal: Out of memory")
+        fake_mt5.symbol_select_ok = False
+        adapter = self._connected_adapter(fake_mt5)
+        with pytest.raises(ProviderError, match="Out of memory"):
+            adapter.fetch_ohlcv(
+                "EURUSD", "1h", datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
+            )
+
+    def test_fetch_ohlcv_call_failed_unknown_symbol_is_symbol_not_found(self, fake_mt5):
+        """Live MT5 reports unknown symbols as ``(-1, 'Terminal: Call failed')``
+        with no SymbolInfo — that must still map to SymbolNotFoundError."""
+        fake_mt5.error = (-1, "Terminal: Call failed")
+        fake_mt5.symbol_select_ok = False
+        fake_mt5.info = None
+        adapter = self._connected_adapter(fake_mt5)
+        with pytest.raises(SymbolNotFoundError, match="NOT_A_SYMBOL"):
+            adapter.fetch_ohlcv(
+                "NOT_A_SYMBOL",
+                "1h",
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 2, tzinfo=UTC),
+            )
+
+    def test_search_instruments_matches_query(self, fake_mt5):
+        """Substring query on the symbol universe (design doc sec 5)."""
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("EUR", limit=10)
+        assert [r.symbol for r in results] == ["EURUSD"]
+        assert all(r.symbol == "EURUSD" or "EUR" in r.symbol for r in results)
+
+    def test_search_instruments_default_returns_all(self, fake_mt5):
+        """An empty query returns the whole universe, capped by ``limit``."""
+        adapter = self._connected_adapter(fake_mt5)
+        assert [r.symbol for r in adapter.search_instruments()] == [
+            "EURUSD",
+            "GBPUSD",
+            "XAUUSD",
+            "DXY_U6",
+        ]
+
+    def test_search_instruments_filters_asset_class(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("", asset_class=AssetClass.METAL, limit=20)
+        assert [r.symbol for r in results] == ["XAUUSD"]
+
+    def test_search_instruments_filters_instrument_type(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("", instrument_type=InstrumentType.FUTURE, limit=20)
+        assert [r.symbol for r in results] == ["DXY_U6"]
+
+    def test_search_instruments_filters_quote(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("", quote="USD", limit=20)
+        assert results
+        assert all(r.currency == "USD" for r in results)
+
+    def test_search_instruments_filters_exchange(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("", exchange="CME", limit=20)
+        assert [r.symbol for r in results] == ["DXY_U6"]
+
+    def test_search_instruments_combined_filters(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments(
+            "DXY", asset_class=AssetClass.INDEX, instrument_type=InstrumentType.FUTURE, limit=20
+        )
+        assert [r.symbol for r in results] == ["DXY_U6"]
+
+    def test_search_instruments_limit(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        assert len(adapter.search_instruments("", limit=2)) == 2
+
+    def test_search_instruments_result_classified(self, fake_mt5):
+        """Each result is a canonical Instrument with extensions (sec 4/5)."""
+        adapter = self._connected_adapter(fake_mt5)
+        results = adapter.search_instruments("DXY_U6")
+        inst = results[0]
+        assert inst.asset_class == AssetClass.INDEX
+        assert inst.instrument_type == InstrumentType.FUTURE
+        assert inst.future is not None
+        assert inst.future.expiry == "2026-09-16"
+        assert inst.future.underlying == "US Dollar Index"
+
+    def test_search_instruments_not_connected_raises(self):
         adapter = MT5Adapter()
-        with pytest.raises(NotSupportedError):
-            adapter.search_instruments("EUR")
+        with pytest.raises(ConnectionError):
+            adapter.search_instruments()
 
 
 # --- Shared adapter contract conformance (mirrors test_binance_contract.py) ---

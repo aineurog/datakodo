@@ -67,3 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RetriesExhaustedError` when the budget is exhausted.
 - Gap detection with warning logging for missing candles.
 - Canonical contract conformance and public `Client("mt5")` registration.
+- Instrument search (`search_instruments`) over the terminal's full symbol
+  universe via `symbols_get`, with a case-insensitive query and combinable
+  asset-class / instrument-type / quote / exchange filters .
+- Friendly select feedback: the first fetch of a symbol logs that it was added
+  to the MarketWatch list and that history is downloading in the background,
+  while a genuinely unknown symbol reports it was not added (it does not exist
+  on the server). Terminal-side failures (e.g. `Out of memory`) surface as
+  `ProviderError`, not a misleading `SymbolNotFoundError`.

@@ -1,4 +1,4 @@
-"""MT5 adapter — implements the AdapterInterface for MetaTrader 5."""
+"""MT5 adapter - implements the AdapterInterface for MetaTrader 5."""
 
 import logging
 from collections.abc import Sequence
@@ -19,6 +19,7 @@ from datakodo.core.enums import AssetClass, Timeframe
 from datakodo.core.exceptions import (
     DataNotAvailableError,
     InvalidTimeframeError,
+    ProviderError,
     SymbolNotFoundError,
 )
 from datakodo.core.instruments import Instrument
@@ -34,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 
 class MT5Adapter(AdapterInterface):
-    """MetaTrader 5 adapter — forex, CFDs, and metals.
+    """MetaTrader 5 adapter - forex, CFDs, and metals.
 
     MT5's Python API is natively blocking (COM-based, Windows-only).
     This adapter runs via thread pool executor when needed.
-    No streaming support — MT5 terminal doesn't provide a real-time
+    No streaming support - MT5 terminal doesn't provide a real-time
     tick feed via the Python API.
     """
 
@@ -53,7 +54,7 @@ class MT5Adapter(AdapterInterface):
 
     native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
     """MT5 offers every canonical timeframe natively (``TIMEFRAME_M1..MN1``),
-    so resampling never triggers in practice — the mechanism (design doc sec 8)
+    so resampling never triggers in practice - the mechanism (design doc sec 8)
     still runs for adapters that restrict this list."""
 
     def __init__(
@@ -90,7 +91,7 @@ class MT5Adapter(AdapterInterface):
         MT5 symbols are self-describing: ``symbol_info`` returns the broker's
         symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
         sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
-        ``"futures"``) that is validated against the detected classification —
+        ``"futures"``) that is validated against the detected classification -
         a mismatch raises ``ProviderError``. An unknown symbol raises
         ``SymbolNotFoundError`` (design doc sec 16).
         """
@@ -105,6 +106,79 @@ class MT5Adapter(AdapterInterface):
             forex_modes=self._rest.forex_calc_modes(),
             market_type=market_type,
         )
+
+    def search_instruments(
+        self,
+        query: str = "",
+        *,
+        asset_class: Any = None,
+        instrument_type: Any = None,
+        quote: str | None = None,
+        exchange: str | None = None,
+        limit: int = 100,
+        **kwargs: Any,
+    ) -> list[Instrument]:
+        """Search the terminal's full symbol universe (design doc sec 5).
+
+        ``mt5.symbols_get()`` returns every symbol the broker serves in a
+        single local call - MT5's cheap symbol list. Each entry is classified
+        into a canonical ``Instrument`` via ``map_instrument`` (spot vs
+        futures, forex, CFD, metal, ...), then filtered client-side.
+        ``query`` is a case-insensitive substring of the symbol (or the
+        futures underlying, when present); ``asset_class``,
+        ``instrument_type``, ``quote`` (the quote/profit currency), and
+        ``exchange`` are optional and combinable. Requires a connected
+        terminal.
+        """
+        futures_modes = self._rest.futures_calc_modes()
+        forex_modes = self._rest.forex_calc_modes()
+        results: list[Instrument] = []
+        for entry in self._rest.symbols_get() or []:
+            symbol = getattr(entry, "name", "") or ""
+            if not symbol:
+                continue
+            try:
+                inst = map_instrument(
+                    symbol,
+                    entry,
+                    futures_modes=futures_modes,
+                    forex_modes=forex_modes,
+                )
+            except ProviderError:
+                continue
+            if not self._search_match(inst, query, asset_class, instrument_type, quote, exchange):
+                continue
+            results.append(inst)
+            if len(results) >= limit:
+                break
+        logger.info("MT5 search returned %d instruments", len(results))
+        return results
+
+    def _search_match(
+        self,
+        inst: Instrument,
+        query: str,
+        asset_class: Any,
+        instrument_type: Any,
+        quote: str | None,
+        exchange: str | None,
+    ) -> bool:
+        """Apply one symbol against every optional search filter (sec 5)."""
+        if query:
+            names = [inst.symbol]
+            if inst.future is not None and inst.future.underlying:
+                names.append(inst.future.underlying)
+            if not any(query.lower() in name.lower() for name in names):
+                return False
+        if asset_class is not None and inst.asset_class != asset_class:
+            return False
+        if instrument_type is not None and inst.instrument_type != instrument_type:
+            return False
+        if quote is not None and inst.currency.lower() != quote.lower():
+            return False
+        if exchange is not None and inst.exchange.lower() != exchange.lower():
+            return False
+        return True
 
     # -- historical (sync) --
 
@@ -137,10 +211,10 @@ class MT5Adapter(AdapterInterface):
         by fetching the largest smaller native timeframe and resampling up,
         controlled by ``Config.flag_resample`` for silent/flagged. MT5 offers
         every canonical timeframe natively, so this never triggers in practice
-        for a stock ``MT5Adapter`` — it applies to restricted subclasses.
+        for a stock ``MT5Adapter`` - it applies to restricted subclasses.
 
         ``output_format`` selects the user-facing representation (design doc
-        sec 13): pandas (default), polars, or arrow — a per-call override of
+        sec 13): pandas (default), polars, or arrow - a per-call override of
         ``Config.output_format``.
 
         Ranges wider than ``MT5Config.max_bars`` bars are auto-paginated and
@@ -321,8 +395,10 @@ class MT5Adapter(AdapterInterface):
     def _no_bars_message(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> str:
         return (
             f"No {timeframe} bars available for {symbol} "
-            f"in [{start.isoformat()}, {end.isoformat()}]. "
-            "Open the symbol's chart in MT5 (or raise 'Max. bars in chart')."
+            f"in [{start.isoformat()}, {end.isoformat()}] yet. "
+            "Data is downloading in the background - this may take some time. "
+            "Open the symbol's chart in MT5 (or raise 'Max. bars in chart') "
+            "to speed it up."
         )
 
     def _session_extras(self, symbol: str) -> tuple[str, ...]:

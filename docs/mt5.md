@@ -127,6 +127,26 @@ and a symbol unknown to the terminal raises `SymbolNotFoundError`. Whenever the
 returned candles skip an interval, a **gap-detection warning** is logged with
 the number of missing candles.
 
+### What the terminal downloads, and how far back
+
+Fetching a symbol selects it in MarketWatch and kicks off the terminal's
+background history download — the adapter logs `Added <symbol> to the
+MarketWatch list. Data is downloading in the background...` the first time.
+The download depth is the terminal's, not the library's: the library requests
+exactly the `start..end` window you asked for. On the IC Markets demo server a
+freshly selected symbol was measured to cover roughly:
+
+- **M1** — the last few weeks only (~3 weeks)
+- **H1** — about 6 years back
+- **D1** — the server's full history (back to ~2004)
+
+Coarser timeframes get deeper history; fine ones keep only recent data. If you
+ask for a window deeper than what is downloaded, you get a
+`DataNotAvailableError` (with the same friendly *"data is downloading in the
+background"* hint) or a gap-detection warning. Opening the symbol's chart in
+MT5 forces the terminal to pull more history for that timeframe, up to the
+**Max. bars in chart** setting (Tools → Options → Charts).
+
 ### Selecting columns
 
 By default you get the invariant base columns. MT5 also offers opt-in extras,
@@ -216,5 +236,20 @@ supported** — `stream_trades` / `stream_orderbook` are not available. Use
 
 ## Instrument Search
 
-MT5 has no cheap symbol-list endpoint, so `search_instruments()` is not
-supported and raises `NotSupportedError`.
+`search_instruments()` searches the **entire symbol universe the terminal
+serves**, fetched once locally via `symbols_get()` (design doc sec 5), and
+returns canonical `Instrument` descriptors. `query` is a case-insensitive
+substring of the symbol (or the futures underlying); the optional
+`asset_class`, `instrument_type`, `quote`, and `exchange` filters combine
+freely:
+
+```python
+with Client("mt5") as client:
+    matches = client.search_instruments("DXY", instrument_type="future")
+for inst in matches:
+    print(inst.symbol, inst.asset_class.value, inst.instrument_type.value)
+```
+
+Discovery feeds the batch flow directly — pass the returned instruments to
+`fetch_ohlcv_batch` ("discovery to fetch is one flow", design doc sec 5).
+Requires a connected terminal.

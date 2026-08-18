@@ -1,6 +1,6 @@
 """MT5 blocking data access (Windows-only).
 
-MT5's Python API is COM-based and blocking — there is no HTTP REST layer.
+MT5's Python API is COM-based and blocking - there is no HTTP REST layer.
 ``MT5REST`` mirrors the shape of a data REST client while talking directly
 to the terminal session owned by :class:`MT5Terminal`. Live streamed feeds
 do not exist either (see ``ws.py``); the closest thing is a blocking tick
@@ -17,6 +17,7 @@ from datakodo.adapters.mt5.terminal import MT5Terminal
 from datakodo.core.config import Config
 from datakodo.core.exceptions import (
     ConnectionError,
+    ProviderError,
     RateLimitError,
     RetriesExhaustedError,
     SymbolNotFoundError,
@@ -62,6 +63,7 @@ class MT5REST:
             rate=terminal.config.rate_limit_rate,
             burst=terminal.config.rate_limit_burst,
         )
+        self._watchlist_added: set[str] = set()
 
     @property
     def _mt5(self) -> Any:
@@ -180,12 +182,14 @@ class MT5REST:
                     f"Symbol {symbol!r} not found on MT5: {description or f'code {code}'}"
                 )
             # No history in the terminal for this window. This usually means
-            # the symbol's chart was never opened, or 'Max. bars in chart' is
-            # set too low for the requested window.
+            # the symbol's chart was never opened (download is still running
+            # in the background), or 'Max. bars in chart' is set too low for
+            # the requested window.
             logger.warning(
                 "No %s history returned for %s [%s \u2192 %s]. "
-                "Open the %s chart in MT5 (or raise 'Max. bars in chart') so "
-                "history is loaded, then retry.",
+                "Data is downloading in the background - this may take some "
+                "time. Open the %s chart in MT5 (or raise 'Max. bars in "
+                "chart') to speed it up.",
                 symbol,
                 timeframe,
                 start_utc.isoformat(),
@@ -201,7 +205,7 @@ class MT5REST:
         """Return the raw ``SymbolInfo`` tuple for *symbol*, or ``None``.
 
         The tuple carries ``trade_calc_mode``, ``path`` (Market Watch tree),
-        contract/tick sizes, currencies, and expiry — the fields used to
+        contract/tick sizes, currencies, and expiry - the fields used to
         classify a symbol as spot, futures, CFD, etc.
         """
         return self._with_retry(1, lambda mt5: mt5.symbol_info(symbol))
@@ -216,21 +220,47 @@ class MT5REST:
         return bool(self._with_retry(1, lambda mt5: mt5.symbol_select(symbol, enable)))
 
     def ensure_symbol_known(self, symbol: str) -> None:
-        """Select *symbol* in MarketWatch, raising ``SymbolNotFoundError`` when
-        the terminal does not recognize it.
+        """Ensure *symbol* is selected in MarketWatch, raising on failure.
 
         ``symbol_select(True)`` also kicks off the terminal's history download,
-        so MT5 loads bars for a symbol whose chart was never opened. Its
-        boolean result is the authoritative signal: a valid symbol returns
-        ``True`` (even one with no loaded chart), while an unknown symbol
-        returns ``False`` (with a terminal-level error from ``last_error()``).
+        so MT5 loads bars for a symbol whose chart was never opened. A
+        ``False`` result means either the terminal does not recognize the
+        symbol (→ ``SymbolNotFoundError``) or the select failed for another
+        reason - e.g. ``Terminal: Out of memory`` (→ ``ProviderError`` with the
+        terminal's own description).
+
+        The two cases are told apart by ``symbol_info``: a symbol the terminal
+        does not know at all returns ``None``, while a real terminal failure
+        (out of memory, IPC hiccup, ...) still resolves the symbol's info.
         """
         if not self.symbol_select(symbol, True):
             code, description = self._ready().last_error()
-            raise SymbolNotFoundError(
-                f"Symbol {symbol!r} is not recognized by the MT5 terminal "
-                f"(symbol_select failed: {description or f'code {code}'})."
+            detail = description or f"code {code}"
+            if self.symbol_info(symbol) is None or self._is_unknown_symbol(code, description):
+                raise SymbolNotFoundError(
+                    f"Symbol {symbol!r} is not recognized by the MT5 terminal "
+                    f"(symbol_select failed: {detail}). "
+                    f"It was not added to the watchlist - it does not exist on this server."
+                )
+            raise ProviderError(f"MT5 symbol_select({symbol!r}) failed: {detail}.")
+        if symbol not in self._watchlist_added:
+            self._watchlist_added.add(symbol)
+            logger.info(
+                "Added %s to the MarketWatch list. Data is downloading in the "
+                "background - this may take some time for a symbol whose chart "
+                "was never opened.",
+                symbol,
             )
+
+    def symbols_get(self) -> Any:
+        """Return the terminal's full symbol list (``mt5.symbols_get``).
+
+        The terminal serves its entire universe locally - the cheap "symbol
+        list" fetch that makes ``search_instruments`` possible (design doc sec
+        5). Returns the raw list of SymbolInfo tuples, or ``None`` on a
+        terminal error.
+        """
+        return self._with_retry(1, lambda mt5: mt5.symbols_get())
 
     def last_error(self) -> tuple[int, str]:
         """The terminal's most recent ``(code, description)`` error pair."""
@@ -246,7 +276,7 @@ class MT5REST:
         """Return the latest raw ``Tick`` tuple for *symbol*, or ``None``.
 
         The tick carries bid/ask/last prices, last volume, and the quote time
-        — the live-price inputs used for fundamentals. This is the closest
+        - the live-price inputs used for fundamentals. This is the closest
         MT5 gets to streaming: a blocking poll, not a push feed.
         """
         return self._with_retry(1, lambda mt5: mt5.symbol_info_tick(symbol))
@@ -266,7 +296,7 @@ class MT5REST:
     def forex_calc_modes(self) -> frozenset[int]:
         """``trade_calc_mode`` integers that identify spot forex pairs.
 
-        Value resolution mirrors ``futures_calc_modes`` — the forex calc-mode
+        Value resolution mirrors ``futures_calc_modes`` - the forex calc-mode
         integers (``SYMBOL_CALC_MODE_FOREX`` and ``..._FOREX_NO_LEVERAGE``)
         also vary by package build, so they are read from the live module.
         """
