@@ -54,3 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Instrument search (`search_instruments`) over exchange info.
 - Spot + USD-M futures support with request-weight-aware rate limiting.
 - Retry with exponential backoff and a `RetriesExhaustedError` on budget.
+
+### Added (MT5)
+- Historical OHLCV through a local MetaTrader 5 terminal, all canonical
+  timeframes natively, timestamped in true UTC (server offset measured live).
+- Full terminal lifecycle: `connect`/`disconnect` and `with Client("mt5"):`.
+- Fundamentals (`fetch_fundamentals`) and instrument classification
+  (`instrument`) from `symbol_info` metadata.
+- Provider config (`MT5Config`, `MT5_` env prefix) with terminal credentials,
+  token-bucket rate limits, and per-request bar caps.
+- Retry with exponential backoff on rate-limit hits and a
+  `RetriesExhaustedError` when the budget is exhausted.
+- Gap detection with warning logging for missing candles.
+- Canonical contract conformance and public `Client("mt5")` registration.
