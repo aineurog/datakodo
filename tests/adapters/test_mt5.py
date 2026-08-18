@@ -1125,6 +1125,33 @@ class TestMT5Adapter:
             adapter.search_instruments("EUR")
 
 
+# --- Shared adapter contract conformance (mirrors test_binance_contract.py) ---
+
+
+def test_shared_contract_default_fetch_matches_canonical(fake_mt5):
+    """A default fetch matches the canonical OHLCV contract.
+
+    Mirrors test_binance_contract.py: base columns only, UTC-aware
+    timestamps, and every returned bar fully closed.
+    """
+    fake_mt5.step = 3600  # hourly bars keep the fixture small
+    adapter = MT5Adapter()
+    adapter.connect()
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=1))
+    assert list(df.columns) == [
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "is_closed",
+    ]
+    assert df["timestamp"].dt.tz is not None
+    assert df["is_closed"].all()
+
+
 # --- Step 8: resampling of non-native timeframes (sec 8) --------------------
 
 
