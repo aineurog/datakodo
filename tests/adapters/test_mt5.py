@@ -19,13 +19,15 @@ from datakodo.adapters.mt5.mapper import (
 )
 from datakodo.adapters.mt5.rest import MT5REST, _as_utc
 from datakodo.adapters.mt5.terminal import MT5Terminal
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import (
     ConnectionError,
     DataNotAvailableError,
     InvalidTimeframeError,
+    NotSupportedError,
     ProviderError,
     RateLimitError,
+    SymbolNotFoundError,
 )
 
 # MT5 CopyRates returns a numpy structured array with these named columns.
@@ -115,6 +117,8 @@ class FakeMT5Module:
         self.info = _symbol_info()  # EURUSD-like forex by default
         self.shutdown_called = False
         self.step = 60  # seconds between fabricated bars
+        self.no_history = False  # when True, copy_rates_range returns None
+        self.symbol_select_ok = True
 
     def initialize(self, *args, **kwargs) -> bool:
         self.init_args = args
@@ -135,11 +139,11 @@ class FakeMT5Module:
 
     def symbol_select(self, symbol, enable=True):
         self.select_calls.append((symbol, enable))
-        return True
+        return self.symbol_select_ok
 
     def copy_rates_range(self, symbol, timeframe, start, end):
         self.calls.append((symbol, timeframe, start, end))
-        if end <= start:
+        if end <= start or self.no_history:
             return None
         times = range(int(start.timestamp()), int(end.timestamp()), self.step)
         rows = np.array(
@@ -252,6 +256,30 @@ class TestMT5RESTMocked:
             )
         assert out is None
         assert any("No EURUSD history returned" in r.message for r in caplog.records)
+
+    def test_copy_rates_range_unknown_symbol_raises_symbol_not_found(self, fake_mt5):
+        fake_mt5.error = (4108, "Unknown symbol")
+        fake_mt5.no_history = True
+        rest = _connected_rest(fake_mt5)
+        with pytest.raises(SymbolNotFoundError, match="NOT_A_SYMBOL"):
+            rest.copy_rates_range(
+                "NOT_A_SYMBOL",
+                1,
+                datetime(2026, 1, 1, tzinfo=UTC),
+                datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=1),
+            )
+
+    def test_copy_rates_range_accepts_cached_offset(self, fake_mt5):
+        """Passing ``offset_seconds`` skips the extra tick poll (N+1 issue)."""
+        fake_mt5.tick = SimpleNamespace(time=int(time.time()) + 3 * 3600)
+        rest = _connected_rest(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        rest.copy_rates_range(
+            "EURUSD", 1, start, start + timedelta(minutes=100), offset_seconds=3 * 3600
+        )
+        symbol, timeframe, req_start, req_end = fake_mt5.calls[0]
+        assert req_start == start + timedelta(hours=3)
+        assert req_end == start + timedelta(minutes=100) + timedelta(hours=3)
 
     def test_server_offset_seconds_snaps_to_hour(self, fake_mt5):
         fake_mt5.tick = SimpleNamespace(time=int(time.time()) + 3 * 3600 + 55)
@@ -746,6 +774,9 @@ class TestMT5Adapter:
         assert adapter.supports_ohlcv is True
         assert adapter.supports_ticks is False
         assert adapter.supports_streaming_orderbook is False
+        assert adapter.supports_fundamentals is True
+        assert adapter.concurrency_model == "serial"
+        assert adapter.native_timeframes == tuple(Timeframe)
 
     def test_fetch_ohlcv_not_connected_raises(self):
         from datetime import datetime
@@ -880,6 +911,48 @@ class TestMT5Adapter:
         with pytest.raises(DataNotAvailableError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, start)
 
+    def test_fetch_ohlcv_unknown_symbol_raises_symbol_not_found(self, fake_mt5):
+        fake_mt5.error = (4108, "Unknown symbol")
+        fake_mt5.symbol_select_ok = False
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(SymbolNotFoundError, match="NOT_A_SYMBOL"):
+            adapter.fetch_ohlcv("NOT_A_SYMBOL", "1h", start, start + timedelta(hours=1))
+
+    def test_fetch_ohlcv_batch_returns_mapping(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        res = adapter.fetch_ohlcv_batch(
+            ["EURUSD", "GBPUSD"], "1h", start, start + timedelta(hours=1)
+        )
+        assert list(res) == ["EURUSD", "GBPUSD"]
+        for df in res.values():
+            assert len(df) > 0
+            assert "is_closed" in df.columns
+
+    def test_fetch_ohlcv_batch_combine_adds_symbol_column(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        res = adapter.fetch_ohlcv_batch(
+            ["EURUSD", "GBPUSD"],
+            "1h",
+            start,
+            start + timedelta(hours=1),
+            combine=True,
+        )
+        assert {"timestamp", "is_closed", "symbol"} <= set(res.columns)
+        assert set(res["symbol"]) == {"EURUSD", "GBPUSD"}
+
+    def test_fetch_ohlcv_batch_unknown_symbol_raises(self, fake_mt5):
+        fake_mt5.error = (4108, "Unknown symbol")
+        fake_mt5.symbol_select_ok = False
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(SymbolNotFoundError):
+            adapter.fetch_ohlcv_batch(
+                ["EURUSD", "NOT_A_SYMBOL"], "1h", start, start + timedelta(hours=1)
+            )
+
     def test_fetch_ohlcv_paginates_large_range(self, fake_mt5):
         """Ranges wider than ``max_bars`` are chunked and stitched (sec 12).
 
@@ -930,6 +1003,146 @@ class TestMT5Adapter:
         import pyarrow as pa
 
         assert isinstance(out, pa.Table)
+
+    # --- Step 7: instrument() / fetch_fundamentals() (offline) ----------------
+
+    def test_instrument_forex(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        inst = adapter.instrument("EURUSD")
+        assert inst.asset_class == AssetClass.FOREX
+        assert inst.instrument_type == InstrumentType.SPOT
+        assert inst.exchange == "MetaTrader 5"
+
+    def test_instrument_metal(self, fake_mt5):
+        info = _symbol_info(
+            name="XAUUSD",
+            path="Commodities\\XAUUSD",
+            currency_base="XAU",
+            currency_profit="USD",
+        )
+        adapter = self._connected_adapter(fake_mt5)
+        fake_mt5.info = info
+        inst = adapter.instrument("XAUUSD")
+        assert inst.asset_class == AssetClass.METAL
+        assert inst.metal is not None
+
+    def test_instrument_futures_maps_via_rest(self, fake_mt5, monkeypatch):
+        """instrument() forwards calc modes resolved from the live module."""
+        fake_mt5.SYMBOL_CALC_MODE_EXCH_FUTURES = 33
+        info = _symbol_info(
+            name="GCZ24",
+            path="Futures\\GCZ24",
+            trade_calc_mode=33,
+            expiration_time=1734393600,
+            currency_base="XAU",
+            currency_profit="USD",
+        )
+        fake_mt5.info = info
+        adapter = self._connected_adapter(fake_mt5)
+        inst = adapter.instrument("GCZ24")
+        assert inst.instrument_type == InstrumentType.FUTURE
+        assert inst.asset_class == AssetClass.METAL
+        assert inst.future.expiry == "2024-12-17"
+
+    def test_instrument_market_type_hint_validated(self, fake_mt5):
+        adapter = self._connected_adapter(fake_mt5)
+        assert adapter.instrument("EURUSD", market_type="spot").instrument_type is (
+            InstrumentType.SPOT
+        )
+        with pytest.raises(ProviderError, match="not future"):
+            adapter.instrument("EURUSD", market_type="future")
+
+    def test_instrument_unknown_symbol_raises(self, fake_mt5):
+        fake_mt5.error = (4108, "Unknown symbol")
+        fake_mt5.symbol_select_ok = False
+        adapter = self._connected_adapter(fake_mt5)
+        with pytest.raises(SymbolNotFoundError, match="NOT_A_SYMBOL"):
+            adapter.instrument("NOT_A_SYMBOL")
+
+    def test_fetch_fundamentals_forex(self, fake_mt5):
+        fake_mt5.tick = SimpleNamespace(time=int(time.time()) + 3 * 3600)  # GMT+3 vs UTC
+        adapter = self._connected_adapter(fake_mt5)
+        f = adapter.fetch_fundamentals("EURUSD")
+        assert f.symbol == "EURUSD"
+        assert f.name == "Euro vs US Dollar"
+        assert f.asset_class == AssetClass.FOREX
+        assert f.instrument_type == InstrumentType.SPOT
+        assert f.currency == "USD"
+        assert f.as_of is not None
+        now = pd.Timestamp.utcnow()
+        assert abs((f.as_of - now).total_seconds()) < 30  # offset-back to true UTC
+
+    def test_fetch_fundamentals_unknown_symbol_raises(self, fake_mt5):
+        fake_mt5.error = (4108, "Unknown symbol")
+        fake_mt5.symbol_select_ok = False
+        adapter = self._connected_adapter(fake_mt5)
+        with pytest.raises(SymbolNotFoundError, match="NOT_A_SYMBOL"):
+            adapter.fetch_fundamentals("NOT_A_SYMBOL")
+
+    def test_fetch_fundamentals_not_connected_raises(self):
+        adapter = MT5Adapter()
+        with pytest.raises(ConnectionError):
+            adapter.fetch_fundamentals("EURUSD")
+
+    def test_search_instruments_not_supported(self):
+        """MT5 has no cheap symbol-list endpoint; the default raises (sec 2)."""
+        adapter = MT5Adapter()
+        with pytest.raises(NotSupportedError):
+            adapter.search_instruments("EUR")
+
+
+# --- Step 8: resampling of non-native timeframes (sec 8) --------------------
+
+
+class _MT5Restricted(MT5Adapter):
+    """An MT5 adapter pretending to offer only 1m and 1h natively."""
+
+    native_timeframes = (Timeframe.M1, Timeframe.H1)
+
+
+def test_fetch_ohlcv_mt5_resamples_non_native_timeframe(fake_mt5):
+    """4h requested, only 1h native -> fetch 1h and resample to 4h bars."""
+    fake_mt5.step = 3600  # one fabricated bar per hour so 1h is a native match
+    adapter = _MT5Restricted()
+    adapter.connect()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    df = adapter.fetch_ohlcv("EURUSD", "4h", start, start + timedelta(days=2), columns="basic")
+    assert not df.empty
+    # Every fabricated bar is resampled 4-to-1 into a 4h bar (48 hourly bars
+    # minus the still-forming one -> ~12 four-hour bars).
+    assert df["is_closed"].all()
+    assert list(df["timestamp"].diff().dropna().unique()) == [pd.Timedelta("4h")]
+    assert 11 <= len(df) <= 13
+
+
+def test_fetch_ohlcv_mt5_native_timeframe_not_resampled(fake_mt5):
+    """A natively offered timeframe is fetched directly, no resampling."""
+    fake_mt5.step = 3600
+    adapter = _MT5Restricted()
+    adapter.connect()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2), columns="basic")
+    assert list(df["timestamp"].diff().dropna().unique())[0] == pd.Timedelta("1h")
+    assert len(df) == 48  # 48 hourly bars, all already closed in this window
+
+
+def test_fetch_ohlcv_mt5_no_native_source_raises(fake_mt5):
+    """5m cannot be derived from a native set starting at 1h (downsampling)."""
+
+    class _NoSmaller(_MT5Restricted):
+        native_timeframes = (Timeframe.H1,)
+
+    adapter = _NoSmaller()
+    adapter.connect()
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    with pytest.raises(ValueError, match="no native timeframe"):
+        adapter.fetch_ohlcv("EURUSD", "5m", start, start + timedelta(hours=2), columns="basic")
+
+
+def test_fetch_ohlcv_stock_adapter_never_resamples(fake_mt5):
+    """The real MT5 adapter offers every canonical timeframe natively."""
+    adapter = MT5Adapter()
+    assert adapter.native_timeframes == tuple(Timeframe)
 
 
 def _demo() -> None:

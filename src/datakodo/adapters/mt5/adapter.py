@@ -6,18 +6,28 @@ from datetime import datetime
 from typing import Any
 
 from datakodo.adapters.mt5.config import MT5Config
-from datakodo.adapters.mt5.mapper import MT5_OHLCV_EXTRAS, map_instrument, map_ohlcv
+from datakodo.adapters.mt5.mapper import (
+    MT5_OHLCV_EXTRAS,
+    map_fundamentals,
+    map_instrument,
+    map_ohlcv,
+)
 from datakodo.adapters.mt5.rest import MT5REST
 from datakodo.adapters.mt5.terminal import MT5Terminal
 from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, Timeframe
-from datakodo.core.exceptions import DataNotAvailableError, InvalidTimeframeError
+from datakodo.core.exceptions import (
+    DataNotAvailableError,
+    InvalidTimeframeError,
+    SymbolNotFoundError,
+)
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import resolve_ohlcv_columns
+from datakodo.core.schemas import Fundamentals, resolve_ohlcv_columns
 from datakodo.core.timeframe import MT5_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
+from datakodo.ops.resample import pick_source_timeframe, resample
 from datakodo.ops.validation import add_is_closed, validate_ohlcv
 
 logger = logging.getLogger(__name__)
@@ -37,8 +47,14 @@ class MT5Adapter(AdapterInterface):
     supports_orderbook_snapshot = False
     supports_streaming_orderbook = False
     supports_streaming_ticks = False
+    supports_fundamentals = True
 
     concurrency_model = "serial"
+
+    native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
+    """MT5 offers every canonical timeframe natively (``TIMEFRAME_M1..MN1``),
+    so resampling never triggers in practice — the mechanism (design doc sec 8)
+    still runs for adapters that restrict this list."""
 
     def __init__(
         self,
@@ -65,6 +81,30 @@ class MT5Adapter(AdapterInterface):
 
     def __exit__(self, *args) -> None:
         self.disconnect()
+
+    # -- instruments (design doc sec 4/5) --
+
+    def instrument(self, symbol: str, market_type: str = "") -> Instrument:
+        """Classify ``symbol`` as spot, futures, forex, CFD, etc.
+
+        MT5 symbols are self-describing: ``symbol_info`` returns the broker's
+        symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
+        sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
+        ``"futures"``) that is validated against the detected classification —
+        a mismatch raises ``ProviderError``. An unknown symbol raises
+        ``SymbolNotFoundError`` (design doc sec 16).
+        """
+        self._rest.ensure_symbol_known(symbol)
+        info = self._rest.symbol_info(symbol)
+        if info is None:
+            raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
+        return map_instrument(
+            symbol,
+            info,
+            futures_modes=self._rest.futures_calc_modes(),
+            forex_modes=self._rest.forex_calc_modes(),
+            market_type=market_type,
+        )
 
     # -- historical (sync) --
 
@@ -93,6 +133,12 @@ class MT5Adapter(AdapterInterface):
         ``InvalidTimeframeError``; an empty terminal history raises
         ``DataNotAvailableError``.
 
+        A timeframe outside ``native_timeframes`` (design doc sec 8) is derived
+        by fetching the largest smaller native timeframe and resampling up,
+        controlled by ``Config.flag_resample`` for silent/flagged. MT5 offers
+        every canonical timeframe natively, so this never triggers in practice
+        for a stock ``MT5Adapter`` — it applies to restricted subclasses.
+
         ``output_format`` selects the user-facing representation (design doc
         sec 13): pandas (default), polars, or arrow — a per-call override of
         ``Config.output_format``.
@@ -105,22 +151,89 @@ class MT5Adapter(AdapterInterface):
         symbol = symbol_of(symbol)
         mt5_tf = _to_mt5_timeframe(timeframe)
         tf = Timeframe(timeframe)
-        # MT5 only buffers history for symbols visible in MarketWatch. Selecting
-        # the symbol first forces the terminal to download/load its bars, so a
-        # symbol whose chart was never opened still returns data.
-        self._rest.symbol_select(symbol, True)
+        # MT5 only buffers history for symbols visible in MarketWatch. Selecting the
+        # symbol first forces the terminal to download/load its bars (a symbol
+        # whose chart was never opened still returns data), and an unknown
+        # symbol fails the select -> SymbolNotFoundError.
+        self._rest.ensure_symbol_known(symbol)
         offset_seconds = self._rest.server_offset_seconds(symbol)
 
         if start >= end:
             raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
 
+        if tf in self.native_timeframes:
+            df, available = self._fetch_ohlcv_native(
+                symbol,
+                tf,
+                mt5_tf,
+                start,
+                end,
+                offset_seconds=offset_seconds,
+                include_live=include_live,
+                columns=columns,
+            )
+        else:
+            source_tf = pick_source_timeframe(tf, self.native_timeframes)
+            self._log_resample(timeframe, source_tf.value)
+            source, _ = self._fetch_ohlcv_native(
+                symbol,
+                source_tf,
+                MT5_MAP[source_tf],
+                start,
+                end,
+                offset_seconds=offset_seconds,
+                include_live=False,
+                columns="basic",
+            )
+            df = resample(source, tf)
+            validate_ohlcv(df)
+            available = ()
+            logger.info(
+                "Resampled %s -> %s (%d bars) for %s",
+                source_tf.value,
+                timeframe,
+                len(df),
+                symbol,
+            )
+
+        resolved = resolve_ohlcv_columns(columns, available)
+        if "session" in resolved:
+            df = df.assign(session="regular")
+        return to_output_format(df[resolved], output_format or self._config.output_format)
+
+    def _fetch_ohlcv_native(
+        self,
+        symbol: str,
+        tf: Timeframe,
+        mt5_tf: int,
+        start: datetime,
+        end: datetime,
+        *,
+        offset_seconds: int,
+        include_live: bool,
+        columns: str | Sequence[str],
+    ) -> tuple[Any, tuple[str, ...]]:
+        """Fetch ``timeframe`` bars the terminal offers natively.
+
+        Shared by ``fetch_ohlcv`` for the direct path and as the source when
+        resampling. Returns ``(validated_bars, available_extras)`` with an
+        ``is_closed`` column; ``include_live`` keeps the still-forming bar
+        (marked ``is_closed=False``), otherwise only closed bars are returned.
+        """
+        timeframe = tf.value
         session_extras = self._session_extras(symbol) if _requests_session(columns) else ()
         available = MT5_OHLCV_EXTRAS + session_extras
         resolved = resolve_ohlcv_columns(columns, available)
         mapped_extras = tuple(extra for extra in MT5_OHLCV_EXTRAS if extra in resolved)
 
         def _fetch_chunk(chunk_symbol: str, chunk_start: datetime, chunk_end: datetime) -> Any:
-            raw = self._rest.copy_rates_range(chunk_symbol, mt5_tf, chunk_start, chunk_end)
+            raw = self._rest.copy_rates_range(
+                chunk_symbol,
+                mt5_tf,
+                chunk_start,
+                chunk_end,
+                offset_seconds=offset_seconds,
+            )
             return map_ohlcv(raw, offset_seconds=offset_seconds, extras=mapped_extras)
 
         df = paginate(
@@ -144,10 +257,47 @@ class MT5Adapter(AdapterInterface):
 
         validate_ohlcv(df)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
+        return df, available
 
-        if "session" in resolved:
-            df = df.assign(session="regular")
-        return to_output_format(df[resolved], output_format or self._config.output_format)
+    def _log_resample(self, requested: str, source: str) -> None:
+        """Warn (or log quietly) that ``requested`` is derived by resampling."""
+        if self._config.flag_resample:
+            logger.warning(
+                "%s has no native %s bars; fetching %s and resampling",
+                self.__class__.__name__,
+                requested,
+                source,
+            )
+        else:
+            logger.info("Deriving %s from %s by resampling", requested, source)
+
+    def fetch_fundamentals(  # type: ignore[override]  # typed subset of base
+        self,
+        symbol: str,
+    ) -> Fundamentals:
+        """Fetch canonical fundamentals / reference data for ``symbol``.
+
+        Combines ``symbol_info`` (currencies, description, classification) with
+        the latest ``Tick`` (live quote time) and the server-time offset, so
+        ``as_of`` is returned in true UTC (design doc sec 3/10). An unknown
+        symbol raises ``SymbolNotFoundError`` (design doc sec 16).
+        """
+        self._rest.ensure_symbol_known(symbol)
+        info = self._rest.symbol_info(symbol)
+        if info is None:
+            raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
+        tick = self._rest.symbol_info_tick(symbol)
+        offset_seconds = self._rest.server_offset_seconds(symbol)
+        fundamentals = map_fundamentals(
+            symbol,
+            info,
+            tick=tick,
+            futures_modes=self._rest.futures_calc_modes(),
+            forex_modes=self._rest.forex_calc_modes(),
+            offset_seconds=offset_seconds,
+        )
+        logger.info("Fetched MT5 fundamentals for %s (as_of=%s)", symbol, fundamentals.as_of)
+        return fundamentals
 
     def _no_bars_message(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> str:
         return (
