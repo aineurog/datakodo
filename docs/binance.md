@@ -1,11 +1,21 @@
-# DataKodo Usage Guide
+# DataKodo Usage Guide — Binance
 
 DataKodo is a unified market data library: one interface, many providers.
-Each provider is documented in its own top-level section below.
+This page covers the **Binance** adapter (spot and USD-M perpetual futures).
+The MetaTrader 5 terminal adapter is documented separately in
+[docs/mt5.md](mt5.md).
 
-Currently only the **Binance** adapter is implemented and documented. When
-additional providers are added, they will get their own sections (Alpaca,
-Bybit, etc.) following the same structure.
+Additional providers (Alpaca, Polygon, IBKR, ...) will get their own
+pages following the same structure.
+
+## Data Precision
+
+Values are returned **unrounded**, exactly as the provider reports them
+(design doc sec 2/18: normalization is structural, not value-level). The
+canonical schema maps columns and shapes; price/volume magnitudes pass
+through untouched so nothing is fabricated or lost. Precision metadata is
+exposed on the `Instrument` object where the provider reports it, so you can
+format to your own spec without the library deciding for you.
 
 ---
 
@@ -321,8 +331,8 @@ Unregistered providers raise `ValueError` listing the available ones. See
 
 Adapters support the context manager protocol (design doc sec 23): `connect()`
 runs on entry, `disconnect()` on exit. The Binance defaults are no-ops, but the
-contract is uniform across providers — MT5/IBKR will use it for their terminal
-connections:
+protocol is uniform across providers — e.g. the MT5 adapter uses it to open and
+close its terminal connection:
 
 ```python
 from datakodo.adapters.binance import BinanceAdapter

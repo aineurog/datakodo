@@ -9,8 +9,16 @@ import importlib
 import pytest
 
 from datakodo.adapters.binance.adapter import BinanceAdapter
-from datakodo.adapters.binance.mapper import map_ohlcv, map_trades
+from datakodo.adapters.binance.mapper import map_ohlcv as map_binance_ohlcv
+from datakodo.adapters.binance.mapper import map_trades
 from datakodo.adapters.binance.rest import BinanceREST
+from datakodo.adapters.mt5 import MT5Adapter as MT5AdapterPackage
+from datakodo.adapters.mt5.adapter import MT5Adapter
+from datakodo.adapters.mt5.config import MT5Config
+from datakodo.adapters.mt5.mapper import map_ohlcv as map_mt5_ohlcv
+from datakodo.adapters.mt5.rest import MT5REST
+from datakodo.adapters.mt5.terminal import MT5Terminal
+from datakodo.client import Client
 from datakodo.core.config import Config
 from datakodo.core.enums import Timeframe
 from datakodo.ratelimit.limiter import TokenBucket
@@ -59,8 +67,11 @@ PUBLIC_MODULES = [
     "datakodo.adapters.ibkr.ws",
     "datakodo.adapters.mt5",
     "datakodo.adapters.mt5.adapter",
+    "datakodo.adapters.mt5.config",
     "datakodo.adapters.mt5.mapper",
+    "datakodo.adapters.mt5.rest",
     "datakodo.adapters.mt5.terminal",
+    "datakodo.adapters.mt5.ws",
 ]
 
 
@@ -77,5 +88,16 @@ def test_representative_objects_initialize():
     assert TokenBucket(rate=1.0, burst=5) is not None
     assert BinanceREST() is not None
     assert BinanceAdapter() is not None
-    assert map_ohlcv([]).empty
+    assert MT5Config(_env_file=None) is not None
+    assert MT5REST(MT5Terminal()) is not None
+    assert MT5Adapter() is not None
+    assert MT5Adapter is MT5AdapterPackage  # package re-export (datakodo.adapters.mt5)
+    assert map_binance_ohlcv([]).empty
+    assert map_mt5_ohlcv([]).empty
     assert map_trades({"T": 1704067200000, "p": "1.0", "q": "1.0", "m": True}).price == 1.0
+
+
+def test_client_registers_mt5():
+    client = Client("mt5")
+    assert client.adapter is not None
+    assert "mt5" in Client.available_providers()

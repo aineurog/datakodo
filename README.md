@@ -35,34 +35,60 @@ your data comes from Binance today or another provider tomorrow.
 Install DataKodo with support for your provider:
 
 ```bash
-pip install datakodo[binance]
+pip install datakodo[binance]    # Binance spot + USD-M futures
+pip install datakodo[mt5]        # MetaTrader 5 terminal (Windows)
 ```
 
 ## Quick Start
 
 ```python
+from datetime import UTC, datetime
+
 from datakodo import Client
 
 client = Client("binance")
-
-df = client.fetch_ohlcv("BTCUSDT", "1h", start, end)
+df = client.fetch_ohlcv(
+    "BTCUSDT",
+    "1h",
+    start=datetime(2026, 8, 1, tzinfo=UTC),
+    end=datetime.now(UTC),
+)
 print(df)
 ```
 
-Public market data needs no API key. See the
-[usage guide](docs/usage.md) for configuration, streaming, and more examples.
+The same `Client` facade works for MetaTrader 5 (requires a running terminal):
+
+```python
+from datetime import UTC, datetime
+
+from datakodo import Client
+
+with Client("mt5") as client:
+    df = client.fetch_ohlcv(
+        "EURUSD",
+        "1h",
+        start=datetime(2026, 8, 1, tzinfo=UTC),
+        end=datetime.now(UTC),
+    )
+print(df)
+```
+
+Public market data needs no API key. Provider usage guides:
+- [Binance](docs/binance.md)
+- [MetaTrader 5](docs/mt5.md)
 
 ## Supported Providers
 
 | Provider | Markets | Status |
 | --- | --- | --- |
 | Binance | Spot, USD-M perpetual futures | Implemented |
+| MetaTrader 5 | Forex, CFDs, metals, indices, futures (local Windows terminal) | Implemented |
 | Alpaca, Bybit, and others | — | Planned |
 
 ## Documentation
 
-- [Usage guide](docs/usage.md) — installation, configuration, and examples.
-- [Design document](docs/design-document.md) — architecture and design decisions.
+- [Usage guide — Binance](docs/binance.md) — installation, configuration, and examples.
+- [Usage guide — MetaTrader 5](docs/mt5.md) — installation, configuration, and examples.
 
 ## License
 
