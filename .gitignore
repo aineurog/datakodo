@@ -9,7 +9,6 @@ dist/
 build/
 demo_output/
 live_output/
-mt5_csv/
 
 *.claude
 *.commandcode
