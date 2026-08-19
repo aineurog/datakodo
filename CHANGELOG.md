@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider-specific settings (e.g. `BinanceConfig`) decoupled from the global
   `Config`; keys come from environment variables or explicit adapter arguments.
 - Configurable output format: pandas, polars, arrow.
-- Adapter scaffolding for Binance, Alpaca, Polygon, MT5, and IBKR.
+- Adapter scaffolding for Binance, Alpaca, Massive, MT5, and IBKR.
 - Each adapter subpackage includes rest, websocket, and mapper modules.
 - Token bucket rate limiter per provider instance.
 - Timeframe mapping from canonical enums to provider specific strings.
