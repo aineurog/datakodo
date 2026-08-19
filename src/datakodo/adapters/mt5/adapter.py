@@ -14,8 +14,9 @@ from datakodo.adapters.mt5.mapper import (
 )
 from datakodo.adapters.mt5.rest import MT5REST
 from datakodo.adapters.mt5.terminal import MT5Terminal
+from datakodo.core.calendar import WeekendClosedCalendar
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, Timeframe
+from datakodo.core.enums import Timeframe
 from datakodo.core.exceptions import (
     DataNotAvailableError,
     InvalidTimeframeError,
@@ -198,8 +199,9 @@ class MT5Adapter(AdapterInterface):
 
         ``columns`` selects the schema: ``"basic"`` returns the canonical base
         columns; ``"all"`` adds every extra column MT5 returns and maps
-        (``spread``, ``real_volume``, and ``session`` for forex); a list
-        requests specific optional columns.
+        (``spread`` and ``real_volume``); a list requests specific optional
+        columns. MT5 has no session-based asset class, so ``session`` is never
+        produced.
 
         By default only fully **closed** bars are returned (design doc sec 18);
         set ``include_live=True`` to keep the still-forming bar, marked
@@ -259,7 +261,7 @@ class MT5Adapter(AdapterInterface):
                 include_live=False,
                 columns="basic",
             )
-            df = resample(source, tf)
+            df = resample(source, tf, calendar=self._calendar())
             validate_ohlcv(df)
             self._log_gaps(symbol, timeframe, start, end, df)
             available = ()
@@ -272,8 +274,6 @@ class MT5Adapter(AdapterInterface):
             )
 
         resolved = resolve_ohlcv_columns(columns, available)
-        if "session" in resolved:
-            df = df.assign(session="regular")
         return to_output_format(df[resolved], output_format or self._config.output_format)
 
     def _fetch_ohlcv_native(
@@ -296,8 +296,7 @@ class MT5Adapter(AdapterInterface):
         (marked ``is_closed=False``), otherwise only closed bars are returned.
         """
         timeframe = tf.value
-        session_extras = self._session_extras(symbol) if _requests_session(columns) else ()
-        available = MT5_OHLCV_EXTRAS + session_extras
+        available = MT5_OHLCV_EXTRAS
         resolved = resolve_ohlcv_columns(columns, available)
         mapped_extras = tuple(extra for extra in MT5_OHLCV_EXTRAS if extra in resolved)
 
@@ -339,7 +338,7 @@ class MT5Adapter(AdapterInterface):
         self, symbol: str, timeframe: str, start: datetime, end: datetime, df: Any
     ) -> None:
         """Warn when the fetched frame has missing candles (design doc sec 18)."""
-        gaps = detect_gaps(df, timeframe)
+        gaps = detect_gaps(df, timeframe, calendar=self._calendar())
         if not gaps.empty:
             missing = int(gaps["gap_missing"].sum())
             logger.warning(
@@ -401,20 +400,16 @@ class MT5Adapter(AdapterInterface):
             "to speed it up."
         )
 
-    def _session_extras(self, symbol: str) -> tuple[str, ...]:
-        """The ``session`` extra column for *symbol*, if any (design doc sec 9).
+    def _calendar(self) -> WeekendClosedCalendar:
+        """The trading calendar for this adapter's universe (design doc sec 9).
 
-        ``session`` exists only for session-based asset classes. MT5's only
-        such class is forex, so metals/CFDs/indices return no session extra.
+        MT5 is a weekend-closed venue: forex, metals, index and equity CFDs,
+        and exchange-traded futures all halt over the weekend. The calendar
+        suppresses those scheduled closures during gap detection. No MT5
+        instrument carries an intraday ``session`` label today, so the
+        ``session`` column is never produced.
         """
-        info = self._rest.symbol_info(symbol)
-        inst = map_instrument(
-            symbol,
-            info,
-            futures_modes=self._rest.futures_calc_modes(),
-            forex_modes=self._rest.forex_calc_modes(),
-        )
-        return ("session",) if inst.asset_class == AssetClass.FOREX else ()
+        return WeekendClosedCalendar()
 
 
 def _to_mt5_timeframe(timeframe: str) -> int:
@@ -426,8 +421,3 @@ def _to_mt5_timeframe(timeframe: str) -> int:
         return MT5_MAP[Timeframe(timeframe)]
     except ValueError:
         raise InvalidTimeframeError(f"Unknown timeframe: {timeframe!r}") from None
-
-
-def _requests_session(columns: Any) -> bool:
-    """True when the caller asked for the optional ``session`` column."""
-    return columns == "all" or (isinstance(columns, (list, tuple, set)) and "session" in columns)

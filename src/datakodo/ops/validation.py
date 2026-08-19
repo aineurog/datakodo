@@ -6,8 +6,10 @@ timestamps, no gaps or duplicates, and an ``is_closed`` flag on every bar.
 Validation failures raise ``DataValidationError`` (design doc sec 18).
 """
 
+import numpy as np
 import pandas as pd
 
+from datakodo.core.calendar import TradingCalendar
 from datakodo.core.exceptions import DataValidationError
 from datakodo.core.timeframe import timeframe_delta
 
@@ -81,12 +83,22 @@ def validate_ohlcv(df: pd.DataFrame) -> None:
         raise DataValidationError("Duplicate timestamps found.")
 
 
-def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+def detect_gaps(
+    df: pd.DataFrame,
+    timeframe: str,
+    calendar: TradingCalendar | None = None,
+) -> pd.DataFrame:
     """Return rows where the interval to the next bar exceeds one candle.
 
     Expects a sorted, deduplicated OHLCV frame. For each row, computes the
     difference to the next row's timestamp; if that gap is larger than one
     candle of ``timeframe``, the row is flagged as a gap boundary.
+
+    When a ``calendar`` is supplied, a gap that spans no trading day strictly
+    between its two bars is treated as a scheduled closure (weekend or holiday)
+    and suppressed. Same-day holes are always real, since the market was open
+    and a candle is missing. Without a calendar every hole larger than one
+    candle is flagged (the previous behavior).
 
     Returns:
         A DataFrame of rows that precede a gap, with an extra ``gap_missing``
@@ -94,7 +106,9 @@ def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         Empty if no gaps are found.
 
     Design doc sec 18: gap detection catches provider-side bugs such as
-    missing candles, exchange downtime, or data feed interruption.
+    missing candles, exchange downtime, or data feed interruption; a calendar
+    (design doc sec 9) turns expected weekend and holiday closures into
+    silence instead of a false alarm.
     """
     if df.empty or "timestamp" not in df.columns or len(df) < 2:
         return df.iloc[:0].assign(gap_missing=0)
@@ -106,6 +120,12 @@ def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     # A gap exists when that interval is larger than one candle.
     gap_mask = intervals > pd.Timedelta(delta)
     gap_mask.iloc[-1] = False  # last row has no "next row"
+
+    if calendar is not None:
+        for i in np.flatnonzero(gap_mask.to_numpy()):
+            if _is_scheduled_closure(calendar, ts.iloc[i], ts.iloc[i + 1]):
+                gap_mask.iloc[i] = False
+
     result = df.loc[gap_mask].copy()
     if result.empty:
         return result.assign(gap_missing=0)
@@ -113,3 +133,19 @@ def detect_gaps(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     gap_candles = ((intervals[gap_mask] / pd.Timedelta(delta)).round().astype(int) - 1).values
     result["gap_missing"] = gap_candles
     return result
+
+
+def _is_scheduled_closure(
+    calendar: TradingCalendar,
+    prev_ts: pd.Timestamp,
+    next_ts: pd.Timestamp,
+) -> bool:
+    """True when a gap between two bars is fully a weekend or holiday closure.
+
+    A hole within a single day is always a real gap (the market was open), so
+    it is never a closure. Across days, the gap is a closure only when no
+    trading day lies strictly between the two bar timestamps.
+    """
+    if prev_ts.date() == next_ts.date():
+        return False
+    return not calendar.has_trading_day_between(prev_ts, next_ts)

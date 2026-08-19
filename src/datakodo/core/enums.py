@@ -43,9 +43,11 @@ class Timeframe(StrEnum):
 
 
 class Session(StrEnum):
-    """Trading session for session-based assets (equity, forex).
+    """Trading session for session-based assets (equity, futures).
 
-    Crypto and other 24/7 assets do not carry a session at all.
+    Crypto (24/7) and continuous forex (24/5) do not carry a session at all;
+    the label only appears when a calendar actually derives it (design doc
+    sec 9).
     """
 
     PRE_MARKET = "pre_market"
