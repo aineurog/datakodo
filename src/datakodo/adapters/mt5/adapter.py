@@ -94,9 +94,9 @@ class MT5Adapter(AdapterInterface):
         sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
         ``"futures"``) that is validated against the detected classification -
         a mismatch raises ``ProviderError``. An unknown symbol raises
-        ``SymbolNotFoundError`` (design doc sec 16).
+``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
@@ -231,7 +231,7 @@ class MT5Adapter(AdapterInterface):
         # symbol first forces the terminal to download/load its bars (a symbol
         # whose chart was never opened still returns data), and an unknown
         # symbol fails the select -> SymbolNotFoundError.
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         offset_seconds = self._rest.server_offset_seconds(symbol)
 
         if start >= end:
@@ -374,7 +374,7 @@ class MT5Adapter(AdapterInterface):
         ``as_of`` is returned in true UTC (design doc sec 3/10). An unknown
         symbol raises ``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
