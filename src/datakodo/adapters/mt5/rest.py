@@ -219,7 +219,32 @@ class MT5REST:
         """
         return bool(self._with_retry(1, lambda mt5: mt5.symbol_select(symbol, enable)))
 
-    def ensure_symbol_known(self, symbol: str) -> None:
+    def resolve_symbol(self, symbol: str) -> str:
+        """Return the terminal's canonical casing for *symbol*.
+
+        MT5's ``symbol_select``/``symbol_info`` lookups are strictly
+        case-sensitive: ``SUGAR_V6`` fails even though the terminal serves
+        ``Sugar_V6``. When the exact name is rejected, resolve the unique
+        case-insensitive match from the symbol universe (``symbols_get``) and
+        return its canonical spelling. Returns ``symbol`` unchanged when no
+        unique match exists, so the caller's normal ``SymbolNotFoundError``
+        path still fires for genuinely unknown symbols.
+        """
+        if self.symbol_select(symbol, True):
+            return symbol
+        target = symbol.lower()
+        matches: list[str] = []
+        for entry in self.symbols_get() or []:
+            name = getattr(entry, "name", "") or ""
+            if name.lower() == target:
+                matches.append(name)
+        if len(matches) == 1:
+            canonical = matches[0]
+            logger.info("Resolved case-insensitive symbol %r -> %r", symbol, canonical)
+            return canonical
+        return symbol
+
+    def ensure_symbol_known(self, symbol: str) -> str:
         """Ensure *symbol* is selected in MarketWatch, raising on failure.
 
         ``symbol_select(True)`` also kicks off the terminal's history download,
@@ -232,25 +257,32 @@ class MT5REST:
         The two cases are told apart by ``symbol_info``: a symbol the terminal
         does not know at all returns ``None``, while a real terminal failure
         (out of memory, IPC hiccup, ...) still resolves the symbol's info.
+
+        Symbol lookup is case-insensitive: ``SUGAR_V6`` is resolved to its
+        canonical ``Sugar_V6`` spelling before selection. Returns the canonical
+        name the terminal actually knows (identical to ``symbol`` when the
+        input already matched).
         """
-        if not self.symbol_select(symbol, True):
+        canonical = self.resolve_symbol(symbol)
+        if not self.symbol_select(canonical, True):
             code, description = self._ready().last_error()
             detail = description or f"code {code}"
-            if self.symbol_info(symbol) is None or self._is_unknown_symbol(code, description):
+            if self.symbol_info(canonical) is None or self._is_unknown_symbol(code, description):
                 raise SymbolNotFoundError(
                     f"Symbol {symbol!r} is not recognized by the MT5 terminal "
                     f"(symbol_select failed: {detail}). "
                     f"It was not added to the watchlist - it does not exist on this server."
                 )
             raise ProviderError(f"MT5 symbol_select({symbol!r}) failed: {detail}.")
-        if symbol not in self._watchlist_added:
-            self._watchlist_added.add(symbol)
+        if canonical not in self._watchlist_added:
+            self._watchlist_added.add(canonical)
             logger.info(
                 "Added %s to the MarketWatch list. Data is downloading in the "
                 "background - this may take some time for a symbol whose chart "
                 "was never opened.",
-                symbol,
+                canonical,
             )
+        return canonical
 
     def symbols_get(self) -> Any:
         """Return the terminal's full symbol list (``mt5.symbols_get``).

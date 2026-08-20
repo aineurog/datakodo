@@ -8,6 +8,7 @@ directly); adding a provider never touches core.
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from importlib.metadata import entry_points
 
@@ -93,10 +94,18 @@ class Client:
     def instrument(self, symbol, market_type=""):
         return self._adapter.instrument(symbol, market_type=market_type)
 
-    def fetch_ohlcv(self, symbol, timeframe, start, end, **kwargs):
+    def fetch_ohlcv(self, symbol, timeframe, start=None, end=None, **kwargs):
+        """Fetch OHLCV candles. ``start``/``end`` default to the last 30 days."""
+        if start is None or end is None:
+            end = end or datetime.now(UTC)
+            start = start or end - timedelta(days=30)
         return self._adapter.fetch_ohlcv(symbol, timeframe, start, end, **kwargs)
 
-    def fetch_ohlcv_batch(self, symbols, timeframe, start, end, **kwargs):
+    def fetch_ohlcv_batch(self, symbols, timeframe, start=None, end=None, **kwargs):
+        """Fetch OHLCV for many symbols. Dates default to the last 30 days."""
+        if start is None or end is None:
+            end = end or datetime.now(UTC)
+            start = start or end - timedelta(days=30)
         return self._adapter.fetch_ohlcv_batch(symbols, timeframe, start, end, **kwargs)
 
     def fetch_ticks(self, symbol, start=None, end=None, **kwargs):
