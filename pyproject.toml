@@ -49,6 +49,7 @@ dependencies = [
 [project.entry-points."datakodo.adapters"]
 binance = "datakodo.adapters.binance:BinanceAdapter"
 mt5 = "datakodo.adapters.mt5:MT5Adapter"
+massive = "datakodo.adapters.massive:MassiveAdapter"
 
 [project.optional-dependencies]
 binance = [

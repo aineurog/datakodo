@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _BUILTINS: dict[str, str] = {
     "binance": "datakodo.adapters.binance:BinanceAdapter",
     "mt5": "datakodo.adapters.mt5:MT5Adapter",
+    "massive": "datakodo.adapters.massive:MassiveAdapter",
 }
 
 _ENTRY_POINT_GROUP = "datakodo.adapters"
