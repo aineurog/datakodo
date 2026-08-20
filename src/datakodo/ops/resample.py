@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 import pandas as pd
 
+from datakodo.core.calendar import TradingCalendar
 from datakodo.core.enums import Timeframe
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,11 @@ def pick_source_timeframe(target: Timeframe, native: Sequence[Timeframe]) -> Tim
     return max(smaller, key=lambda tf: _TIMEFRAME_MINUTES[tf])
 
 
-def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
+def resample(
+    df: pd.DataFrame,
+    target_timeframe: Timeframe,
+    calendar: TradingCalendar | None = None,
+) -> pd.DataFrame:
     """Resample an OHLCV frame to a larger target timeframe.
 
     Standard OHLCV aggregation rules:
@@ -63,9 +68,14 @@ def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
     source period is missing candles (a gap) are dropped rather than silently
     aggregated over the gap. Resampled bars are always fully closed.
 
+    When a ``calendar`` is supplied, output bars whose timestamp falls on a
+    non-trading day are dropped (design doc sec 9). This keeps weekly and
+    monthly aggregates aligned to trading days rather than the wall clock.
+
     Args:
         df: OHLCV frame with a DatetimeIndex or a 'timestamp' column.
         target_timeframe: The desired output Timeframe enum value.
+        calendar: Optional trading calendar used to drop non-trading-day bars.
 
     Returns:
         A new DataFrame resampled to *target_timeframe* with an ``is_closed``
@@ -138,7 +148,14 @@ def resample(df: pd.DataFrame, target_timeframe: Timeframe) -> pd.DataFrame:
         )
         result["session"] = session.reindex(result.index)
 
-    return result.reset_index()
+    result = result.reset_index()
+
+    if calendar is not None:
+        # Drop output bars anchored on a non-trading day (design doc sec 9).
+        keep = result["timestamp"].map(calendar.is_trading_day)
+        result = result.loc[keep].reset_index(drop=True)
+
+    return result
 
 
 def _expected_bars(source_minutes: float, target_minutes: int) -> int | None:

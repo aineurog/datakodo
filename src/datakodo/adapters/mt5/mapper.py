@@ -60,8 +60,7 @@ def map_ohlcv(
 
     Returns the base OHLCV columns (``timestamp, open, high, low, close,
     volume``) plus any requested extras. ``is_closed`` is added by the adapter
-    (design doc sec 3); ``session`` is a per-provider extra for session-based
-    asset classes, added by the adapter under ``columns="all"`` (sec 3/9).
+    (design doc sec 3).
     """
     if volume not in VOLUME_BASELINES:
         raise ProviderError(

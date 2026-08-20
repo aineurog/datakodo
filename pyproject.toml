@@ -66,6 +66,9 @@ mt5 = [
 ibkr = [
     "ib-insync>=0.9",
 ]
+calendar = [
+    "exchange_calendars>=4.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

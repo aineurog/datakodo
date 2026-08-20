@@ -1,8 +1,11 @@
 """Resampling tests."""
 
+from datetime import date
+
 import pandas as pd
 import pytest
 
+from datakodo.core.calendar import WeekendClosedCalendar
 from datakodo.core.enums import Timeframe
 from datakodo.ops.resample import resample
 
@@ -61,3 +64,32 @@ class TestResample:
         result = resample(df, Timeframe.H1)
         # When a DatetimeIndex is used, the method resets it to a column.
         assert "timestamp" in result.columns
+
+
+def _hourly_df(start: str, periods: int) -> pd.DataFrame:
+    """Contiguous hourly OHLCV bars starting at *start*."""
+    n = periods
+    idx = pd.date_range(start, periods=n, freq="1h", tz="UTC")
+    return pd.DataFrame(
+        {
+            "timestamp": idx,
+            "open": [1.0] * n,
+            "high": [2.0] * n,
+            "low": [0.5] * n,
+            "close": [1.5] * n,
+            "volume": [1.0] * n,
+        }
+    )
+
+
+class TestResampleCalendar:
+    def test_drops_non_trading_day_bars(self):
+        """Weekend daily bars are dropped when a calendar is supplied."""
+        df = _hourly_df("2024-01-05 00:00", 96)  # Fri 00:00 .. Mon 23:00
+        result = resample(df, Timeframe.D1, calendar=WeekendClosedCalendar())
+        assert result["timestamp"].dt.date.tolist() == [date(2024, 1, 5), date(2024, 1, 8)]
+
+    def test_without_calendar_keeps_weekend_bars(self):
+        df = _hourly_df("2024-01-05 00:00", 96)
+        result = resample(df, Timeframe.D1)
+        assert len(result) == 4

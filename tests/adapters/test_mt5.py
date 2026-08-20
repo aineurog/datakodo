@@ -903,7 +903,8 @@ class TestMT5Adapter:
         first_request = fake_mt5.calls[0]
         assert first_request[0] == first_select[0]
 
-    def test_fetch_ohlcv_all_adds_session_for_forex(self, fake_mt5):
+    def test_fetch_ohlcv_all_no_session_for_forex(self, fake_mt5):
+        """Forex is 24/5 and carries no session (design doc sec 9)."""
         df = self._fetch(fake_mt5, columns="all")
         assert list(df.columns) == [
             "timestamp",
@@ -913,21 +914,27 @@ class TestMT5Adapter:
             "close",
             "volume",
             "is_closed",
-            "session",
             "spread",
             "real_volume",
         ]
-        assert set(df["session"]) == {"regular"}
+        assert "session" not in df.columns
 
     def test_fetch_ohlcv_all_exposes_raw_extras(self, fake_mt5):
         df = self._fetch(fake_mt5, columns="all")
         assert df["spread"].iloc[0] == 5
         assert df["real_volume"].iloc[0] == 0  # fake rows carry real_volume=0
 
-    def test_fetch_ohlcv_explicit_session_forex(self, fake_mt5):
-        df = self._fetch(fake_mt5, columns=["session"])
-        assert "session" in df.columns
-        assert "is_closed" in df.columns
+    def test_fetch_ohlcv_explicit_session_forex_raises(self, fake_mt5):
+        """MT5 has no session-based class, so ``session`` is not offered."""
+        with pytest.raises(ValueError, match="not available"):
+            self._fetch(fake_mt5, columns=["session"])
+
+    def test_adapter_uses_weekend_closed_calendar(self, fake_mt5):
+        """MT5 is a weekend-closed venue, so gap detection skips those closures."""
+        from datakodo.core.calendar import WeekendClosedCalendar
+
+        adapter = self._connected_adapter(fake_mt5)
+        assert isinstance(adapter._calendar(), WeekendClosedCalendar)
 
     def test_fetch_ohlcv_explicit_raw_extra(self, fake_mt5):
         df = self._fetch(fake_mt5, columns=["spread"])
@@ -1466,19 +1473,16 @@ def _demo() -> None:
     print(f"   {list(map_ohlcv(raw, volume='real_volume').columns)}")
 
     print("\n4) fetch_ohlcv columns by selection:")
-    from datakodo.adapters.mt5.adapter import _requests_session
     from datakodo.adapters.mt5.mapper import MT5_OHLCV_EXTRAS
     from datakodo.core.schemas import resolve_ohlcv_columns
     from datakodo.ops.validation import add_is_closed
 
-    for columns in ("basic", "all", ["session"], ["spread", "real_volume"]):
-        available = MT5_OHLCV_EXTRAS + (("session",) if _requests_session(columns) else ())
+    for columns in ("basic", "all", ["spread", "real_volume"]):
+        available = MT5_OHLCV_EXTRAS
         resolved = resolve_ohlcv_columns(columns, available)
         mapped_extras = tuple(e for e in MT5_OHLCV_EXTRAS if e in resolved)
         df = map_ohlcv(_make_rates(2), extras=mapped_extras)
         df = add_is_closed(df, "1h")
-        if "session" in resolved:
-            df = df.assign(session="regular")
         print(f"   columns={columns!r:<14} -> {df[resolved].columns.tolist()}")
 
     print("\nNote: tick_volume folds into 'volume' (default baseline);")
