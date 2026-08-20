@@ -25,7 +25,11 @@ from datakodo.core.exceptions import (
 )
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import Fundamentals, resolve_ohlcv_columns
+from datakodo.core.schemas import (
+    Fundamentals,
+    available_ohlcv_extras,
+    resolve_ohlcv_columns,
+)
 from datakodo.core.timeframe import MT5_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
@@ -94,9 +98,9 @@ class MT5Adapter(AdapterInterface):
         sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
         ``"futures"``) that is validated against the detected classification -
         a mismatch raises ``ProviderError``. An unknown symbol raises
-        ``SymbolNotFoundError`` (design doc sec 16).
+``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
@@ -231,7 +235,7 @@ class MT5Adapter(AdapterInterface):
         # symbol first forces the terminal to download/load its bars (a symbol
         # whose chart was never opened still returns data), and an unknown
         # symbol fails the select -> SymbolNotFoundError.
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         offset_seconds = self._rest.server_offset_seconds(symbol)
 
         if start >= end:
@@ -246,7 +250,6 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=include_live,
-                columns=columns,
             )
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
@@ -259,7 +262,6 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=False,
-                columns="basic",
             )
             df = resample(source, tf, calendar=self._calendar())
             validate_ohlcv(df)
@@ -286,7 +288,6 @@ class MT5Adapter(AdapterInterface):
         *,
         offset_seconds: int,
         include_live: bool,
-        columns: str | Sequence[str],
     ) -> tuple[Any, tuple[str, ...]]:
         """Fetch ``timeframe`` bars the terminal offers natively.
 
@@ -294,11 +295,10 @@ class MT5Adapter(AdapterInterface):
         resampling. Returns ``(validated_bars, available_extras)`` with an
         ``is_closed`` column; ``include_live`` keeps the still-forming bar
         (marked ``is_closed=False``), otherwise only closed bars are returned.
+        ``available_extras`` is derived from the mapped frame, so it reflects
+        exactly what the mapper produced for this call (design doc sec 3).
         """
         timeframe = tf.value
-        available = MT5_OHLCV_EXTRAS
-        resolved = resolve_ohlcv_columns(columns, available)
-        mapped_extras = tuple(extra for extra in MT5_OHLCV_EXTRAS if extra in resolved)
 
         def _fetch_chunk(chunk_symbol: str, chunk_start: datetime, chunk_end: datetime) -> Any:
             raw = self._rest.copy_rates_range(
@@ -308,7 +308,7 @@ class MT5Adapter(AdapterInterface):
                 chunk_end,
                 offset_seconds=offset_seconds,
             )
-            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=mapped_extras)
+            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=MT5_OHLCV_EXTRAS)
 
         df = paginate(
             _fetch_chunk,
@@ -332,7 +332,7 @@ class MT5Adapter(AdapterInterface):
         validate_ohlcv(df)
         self._log_gaps(symbol, timeframe, start, end, df)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
-        return df, available
+        return df, available_ohlcv_extras(df.columns)
 
     def _log_gaps(
         self, symbol: str, timeframe: str, start: datetime, end: datetime, df: Any
@@ -374,7 +374,7 @@ class MT5Adapter(AdapterInterface):
         ``as_of`` is returned in true UTC (design doc sec 3/10). An unknown
         symbol raises ``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
