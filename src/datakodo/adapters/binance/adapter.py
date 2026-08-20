@@ -12,7 +12,6 @@ from typing import Any
 
 from datakodo.adapters.binance.config import BinanceConfig
 from datakodo.adapters.binance.mapper import (
-    BINANCE_OHLCV_EXTRAS,
     map_fundamentals,
     map_ohlcv,
     map_orderbook,
@@ -27,7 +26,12 @@ from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import DataNotAvailableError
 from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import OrderBook, Trade, resolve_ohlcv_columns
+from datakodo.core.schemas import (
+    OrderBook,
+    Trade,
+    available_ohlcv_extras,
+    resolve_ohlcv_columns,
+)
 from datakodo.core.timeframe import BINANCE_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
@@ -196,7 +200,6 @@ class BinanceAdapter(AdapterInterface):
 
         if tf in self.native_timeframes:
             df = self._fetch_ohlcv_native(symbol, timeframe, start, end, market_type, include_live)
-            available = BINANCE_OHLCV_EXTRAS
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
             self._log_resample(timeframe, source_tf.value)
@@ -205,7 +208,6 @@ class BinanceAdapter(AdapterInterface):
             )
             df = resample(source, tf)
             validate_ohlcv(df)
-            available = ()
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s %s",
                 source_tf.value,
@@ -215,6 +217,7 @@ class BinanceAdapter(AdapterInterface):
                 symbol,
             )
 
+        available = available_ohlcv_extras(df.columns)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
 
