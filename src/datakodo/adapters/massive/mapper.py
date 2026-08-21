@@ -11,6 +11,8 @@ from typing import Any
 import pandas as pd
 
 from datakodo.core.schemas import Trade, resolve_ohlcv_columns
+from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.instruments import Instrument
 from datakodo.core.timeframe import timeframe_delta
 
 # Optional columns Massive can supply on top of the canonical base (design sec 3).
@@ -89,6 +91,91 @@ def map_ohlcv(
     df = pd.DataFrame(rows)
     df["is_closed"] = df["timestamp"] + timeframe_delta(timeframe) <= pd.Timestamp.now(tz="UTC")
     return df[resolved]
+
+
+def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = None) -> Instrument:
+    """Classify a Massive ticker dict into a canonical ``Instrument``.
+
+    Massive ticker list fields -> ``Instrument`` mapping (design doc sec 6.2):
+
+    - ``ticker``        -> ``symbol``, ``provider_symbol`` (prefixed form verbatim)
+    - ``market``        -> ``asset_class``  (stocks->equity, crypto->crypto,
+      fx->forex, indices->index, options->equity, futures->asset_class from
+      underlying root)
+    - ``type``          -> ``instrument_type`` (equities spot, options parsed
+      from OCC, futures future, crypto spot/perpetual)
+    - ``primary_exchange`` -> ``exchange``  (raw code)
+    - ``currency_name`` -> ``currency``     (uppercased)
+    - typed extensions  -> left as None; filled lazily via
+      ``ticker_details()`` when a specific symbol is selected (design doc
+      sec 6.3).
+
+    The ``asset_class`` and ``instrument_type`` are derived from the Massive
+    ``market`` and ``type`` fields as follows:
+
+    - ``stocks``       -> ``asset_class=EQUITY``, ``instrument_type=SPOT``
+    - ``crypto``       -> ``asset_class=CRYPTO``, ``instrument_type=SPOT`` or
+      ``PERPETUAL`` (if ``type`` contains ``perpetual``)
+    - ``forex``        -> ``asset_class=FOREX``, ``instrument_type=SPOT``
+    - ``indices``      -> ``asset_class=INDEX``, ``instrument_type=SPOT``
+    - ``options``      -> ``asset_class=EQUITY``, ``instrument_type=OPTION``
+    - ``futures``      -> ``asset_class=EQUITY``, ``instrument_type=FUTURE``
+    """
+    raw_ticker = (ticker.get("ticker") or "").upper()
+    name = ticker.get("name") or ""
+    massive_market = (ticker.get("market") or "").lower()
+    massive_type = (ticker.get("type") or "").lower()
+    exchange = ticker.get("primary_exchange") or ""
+    currency_name = (ticker.get("currency_name") or "").upper()
+
+    # -- asset_class -------------------------------------------------------
+    if massive_market == "stocks":
+        asset_class = AssetClass.EQUITY
+        instrument_type = InstrumentType.SPOT
+    elif massive_market == "crypto":
+        asset_class = AssetClass.CRYPTO
+        if "perpetual" in massive_type:
+            instrument_type = InstrumentType.PERPETUAL
+        else:
+            instrument_type = InstrumentType.SPOT
+    elif massive_market == "forex":
+        asset_class = AssetClass.FOREX
+        instrument_type = InstrumentType.SPOT
+    elif massive_market == "indices":
+        asset_class = AssetClass.INDEX
+        instrument_type = InstrumentType.SPOT
+    elif massive_market == "options":
+        asset_class = AssetClass.EQUITY
+        instrument_type = InstrumentType.OPTION
+    elif massive_market == "futures":
+        asset_class = AssetClass.EQUITY
+        instrument_type = InstrumentType.FUTURE
+    else:
+        asset_class = AssetClass.EQUITY
+        instrument_type = InstrumentType.SPOT
+
+    # -- instrument_type from ``type`` field refinement --------------------
+    if massive_type == "option":
+        instrument_type = InstrumentType.OPTION
+    elif massive_type == "future":
+        instrument_type = InstrumentType.FUTURE
+
+    # -- currency ----------------------------------------------------------
+    currency = currency_name if currency_name else "USD"
+
+    # -- build Instrument --------------------------------------------------
+    inst = Instrument(
+        symbol=raw_ticker,
+        provider_symbol=raw_ticker,
+        exchange=exchange or "Massive",
+        currency=currency,
+        asset_class=asset_class,
+        instrument_type=instrument_type,
+    )
+
+    # typed extensions are left as None; they are filled lazily via
+    # ``ticker_details()`` when a specific symbol is selected (design doc sec 6.3)
+    return inst
 
 
 def map_trades(raw: dict[str, Any]) -> Trade:

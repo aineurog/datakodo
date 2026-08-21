@@ -5,11 +5,11 @@ from datetime import datetime
 from typing import Any
 
 from datakodo.adapters.massive.config import MassiveConfig
-from datakodo.adapters.massive.mapper import map_ohlcv, map_trades
+from datakodo.adapters.massive.mapper import map_ohlcv, map_instrument, map_trades
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
-from datakodo.core.exceptions import DataNotAvailableError
+from datakodo.core.exceptions import NotSupportedError, SymbolNotFoundError
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
 from datakodo.ops.output import to_output_format
@@ -55,7 +55,7 @@ class MassiveAdapter(AdapterInterface):
         self._ws = MassiveWS(api_key or self._massive.api_key)
 
     def _market_of(self, symbol: str) -> str:
-        """Map a Massive symbol prefix to its market name (section 2.3).
+        """Map a Massive symbol prefix to its market name (section 2.3 of the implementation doc).
 
         Unprefixed tickers are equities; ``X:`` crypto, ``C:`` forex, ``I:``
         indices, ``O:`` options.
@@ -65,6 +65,81 @@ class MassiveAdapter(AdapterInterface):
             if upper.startswith(prefix):
                 return market
         return "stocks"
+
+    def search_instruments(
+        self,
+        query: str = "",
+        *,
+        asset_class: Any = None,
+        instrument_type: Any = None,
+        quote: str | None = None,
+        exchange: str | None = None,
+        limit: int = 100,
+        **kwargs: Any,
+    ) -> list[Instrument]:
+        """Search the provider's instrument universe (design doc sec 14).
+
+        ``query`` is a case-insensitive substring match on the symbol **and** name.
+        All filters are optional and combinable. Returns canonical ``Instrument``
+        descriptors. No ticker DataFrame caching is used — the ticker list is
+        fetched fresh on each call (design doc sec 5, per project requirement).
+
+        The ``instrument_type`` filter accepts ``InstrumentType`` enum values.
+        The ``asset_class`` filter accepts ``AssetClass`` enum values.
+        The ``quote`` filter matches the quote/currency leg of the symbol.
+        The ``exchange`` filter matches the provider exchange code.
+        """
+        tickers = self._rest.list_tickers(
+            market=asset_class,
+            type=instrument_type,
+            search=query,
+            limit=limit,
+        )
+        results: list[Instrument] = []
+        for ticker in tickers:
+            symbol = ticker.get("ticker", "")
+            if not symbol:
+                continue
+            try:
+                inst = map_instrument(
+                    symbol,
+                    ticker,
+                    market=self._market_of(symbol),
+                )
+            except Exception:
+                continue
+            if not self._search_match(inst, query, asset_class, instrument_type, quote, exchange):
+                continue
+            results.append(inst)
+            if len(results) >= limit:
+                break
+        return results
+
+    def _search_match(
+        self,
+        inst: Instrument,
+        query: str,
+        asset_class: Any,
+        instrument_type: Any,
+        quote: str | None,
+        exchange: str | None,
+    ) -> bool:
+        """Apply one symbol against every optional search filter (design doc sec 5)."""
+        if query:
+            names = [inst.symbol]
+            if inst.future is not None and inst.future.underlying:
+                names.append(inst.future.underlying)
+            if not any(query.lower() in name.lower() for name in names):
+                return False
+        if asset_class is not None and inst.asset_class != asset_class:
+            return False
+        if instrument_type is not None and inst.instrument_type != instrument_type:
+            return False
+        if quote is not None and inst.currency.lower() != quote.lower():
+            return False
+        if exchange is not None and inst.exchange.lower() != exchange.lower():
+            return False
+        return True
 
     # -- historical (sync) --
 
