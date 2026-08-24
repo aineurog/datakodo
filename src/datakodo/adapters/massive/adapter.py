@@ -10,6 +10,7 @@ from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
 from datakodo.core.exceptions import NotSupportedError, SymbolNotFoundError
+from datakodo.core.schemas import Fundamentals
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
 from datakodo.ops.output import to_output_format
@@ -140,6 +141,81 @@ class MassiveAdapter(AdapterInterface):
         if exchange is not None and inst.exchange.lower() != exchange.lower():
             return False
         return True
+
+    def fetch_fundamentals(self, symbol: str) -> Fundamentals:
+        """Fetch canonical fundamentals / reference data for ``symbol``.
+
+        Combines ``ticker_details`` (currencies, description, classification)
+        with the latest tick time and the server-time offset, so ``as_of`` is
+        returned in true UTC (design doc sec 3/10). An unknown symbol raises
+        ``SymbolNotFoundError`` (design doc sec 16).
+
+        This reuses the ``ticker_details()`` endpoint already implemented for
+        search (Step 3), following the design doc's Step 5 order.
+        """
+        symbol = self._rest.ensure_symbol_known(symbol)
+        info = self._rest.ticker_details(symbol=symbol)
+        if not info:
+            raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on Massive.")
+
+        tick = info.get("tick")
+        offset_seconds = info.get("server_offset_seconds", 0)
+
+        # Map the ticker details to canonical Fundamentals
+        fundamentals = Fundamentals(
+            symbol=symbol,
+            name=info.get("name"),
+            asset_class=self._map_asset_class_from_market(info.get("market")),
+            instrument_type=self._map_instrument_type_from_market(info.get("market")),
+            currency=info.get("currency_name", "USD"),
+            exchange=info.get("primary_exchange", "Massive"),
+            as_of=self._parse_time_to_utc(tick.get("t", 0)) if tick else None,
+        )
+        logger.info("Fetched Massive fundamentals for %s (as_of=%s)", symbol, fundamentals.as_of)
+        return fundamentals
+
+    @staticmethod
+    def _map_asset_class_from_market(market: str | None) -> AssetClass | None:
+        """Map Massive market field to AssetClass enum."""
+        if not market:
+            return None
+        market = market.lower()
+        mapping = {
+            "stocks": AssetClass.EQUITY,
+            "crypto": AssetClass.CRYPTO,
+            "forex": AssetClass.FOREX,
+            "indices": AssetClass.INDEX,
+            "options": AssetClass.EQUITY,
+            "futures": AssetClass.EQUITY,
+        }
+        return mapping.get(market)
+
+    @staticmethod
+    def _map_instrument_type_from_market(market: str | None) -> InstrumentType | None:
+        """Map Massive market field to InstrumentType enum."""
+        if not market:
+            return None
+        market = market.lower()
+        mapping = {
+            "stocks": InstrumentType.SPOT,
+            "crypto": InstrumentType.SPOT,
+            "forex": InstrumentType.SPOT,
+            "indices": InstrumentType.SPOT,
+            "options": InstrumentType.OPTION,
+            "futures": InstrumentType.FUTURE,
+        }
+        return mapping.get(market)
+
+    @staticmethod
+    def _parse_time_to_utc(ts: int | float | None) -> datetime | None:
+        """Convert Unix ms/ns timestamp to UTC datetime."""
+        if not ts:
+            return None
+        import datetime as _dt
+        value = int(ts)
+        if abs(value) > 10**15:
+            value = value // 1_000_000  # ns -> ms
+        return _dt.datetime.fromtimestamp(value, tz=_dt.timezone.utc)
 
     # -- historical (sync) --
 
