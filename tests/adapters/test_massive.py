@@ -154,26 +154,47 @@ class TestMassiveAdapter:
 
     # -- search_instruments logic tests --
 
-    def test_search_instruments_returns_instrument_objects(self):
+    def _fake_tickers(self):
+        """Canned ticker reference rows (offline, no API key needed)."""
+        return [
+            {
+                "ticker": "AAPL",
+                "name": "Apple Inc.",
+                "market": "stocks",
+                "type": "stock",
+                "primary_exchange": "NMS",
+                "currency_name": "usd",
+                "active": True,
+            },
+            {
+                "ticker": "MSFT",
+                "name": "Microsoft Corp.",
+                "market": "stocks",
+                "type": "stock",
+                "primary_exchange": "NMS",
+                "currency_name": "usd",
+                "active": True,
+            },
+        ]
+
+    def test_search_instruments_returns_instrument_objects(self, monkeypatch):
         """Test that search_instruments returns list of Instrument objects."""
-        adapter = MassiveAdapter()
+        adapter = MassiveAdapter(api_key="test-key")
+        monkeypatch.setattr(adapter._rest, "list_tickers", lambda *a, **k: self._fake_tickers())
         results = adapter.search_instruments(query="AAPL")
         assert isinstance(results, list)
-        # If API key is configured, we should get results
-        # If not, results may be empty - that's OK for logic test
-        if results:
-            assert all(isinstance(inst, Instrument) for inst in results)
+        assert len(results) > 0
+        assert all(isinstance(inst, Instrument) for inst in results)
 
-    def test_search_instruments_basic_query_structure(self):
+    def test_search_instruments_basic_query_structure(self, monkeypatch):
         """Test search_instruments with query returns properly structured results."""
-        adapter = MassiveAdapter()
+        adapter = MassiveAdapter(api_key="test-key")
+        monkeypatch.setattr(adapter._rest, "list_tickers", lambda *a, **k: self._fake_tickers())
         results = adapter.search_instruments(query="AAPL")
-        # If we get results, verify structure
-        if results:
-            assert len(results) > 0
-            assert all(hasattr(inst, "symbol") for inst in results)
-            assert all(hasattr(inst, "asset_class") for inst in results)
-            assert all(hasattr(inst, "instrument_type") for inst in results)
+        assert len(results) > 0
+        assert all(hasattr(inst, "symbol") for inst in results)
+        assert all(hasattr(inst, "asset_class") for inst in results)
+        assert all(hasattr(inst, "instrument_type") for inst in results)
 
     # -- _search_match logic tests --
 
