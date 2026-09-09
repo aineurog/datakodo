@@ -119,9 +119,7 @@ class _MassiveClient(RESTClient):
                 f"Massive: endpoint requires a paid tier ({status}). {body[:200]}"
             )
         if status == 404:
-            return SymbolNotFoundError(
-                f"Massive ticker not found ({status}). {body[:200]}"
-            )
+            return SymbolNotFoundError(f"Massive ticker not found ({status}). {body[:200]}")
         if status == 429:
             retry_after = 0.0
             headers = getattr(resp, "headers", None)

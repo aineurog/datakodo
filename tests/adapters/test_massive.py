@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 
 import pytest
+
 from datakodo.adapters.massive.adapter import MassiveAdapter
 from datakodo.adapters.massive.mapper import map_instrument
 from datakodo.core.enums import AssetClass, InstrumentType
@@ -17,7 +18,6 @@ class TestMassiveAdapter:
         assert adapter.supports_fundamentals is True
 
     def test_fetch_ohlcv_not_implemented_yet(self):
-        from datetime import datetime
 
         adapter = MassiveAdapter()
         now = datetime.now(UTC)
@@ -172,96 +172,164 @@ class TestMassiveAdapter:
             instrument_type=InstrumentType.SPOT,
         )
         # Matching query
-        result = adapter._search_match(inst, query="AAPL", asset_class=None,
-                                       instrument_type=None, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst, query="AAPL", asset_class=None, instrument_type=None, quote=None, exchange=None
+        )
         assert result is True
         # Non-matching query
-        result = adapter._search_match(inst, query="MSFT", asset_class=None,
-                                       instrument_type=None, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst, query="MSFT", asset_class=None, instrument_type=None, quote=None, exchange=None
+        )
         assert result is False
 
     def test_search_match_asset_class(self):
         """Test _search_match with asset_class filter."""
         adapter = MassiveAdapter()
         inst_equity = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         inst_crypto = Instrument(
-            symbol="BTC", provider_symbol="BTC", exchange="Crypto", currency="USD",
-            asset_class=AssetClass.CRYPTO, instrument_type=InstrumentType.SPOT,
+            symbol="BTC",
+            provider_symbol="BTC",
+            exchange="Crypto",
+            currency="USD",
+            asset_class=AssetClass.CRYPTO,
+            instrument_type=InstrumentType.SPOT,
         )
         # Matching equity
-        result = adapter._search_match(inst_equity, query="", asset_class=AssetClass.EQUITY,
-                                       instrument_type=None, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst_equity,
+            query="",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=None,
+            quote=None,
+            exchange=None,
+        )
         assert result is True
         # Matching crypto filter on equity should fail
-        result = adapter._search_match(inst_equity, query="", asset_class=AssetClass.CRYPTO,
-                                       instrument_type=None, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst_equity,
+            query="",
+            asset_class=AssetClass.CRYPTO,
+            instrument_type=None,
+            quote=None,
+            exchange=None,
+        )
         assert result is False
         # Matching crypto on crypto should pass
-        result = adapter._search_match(inst_crypto, query="", asset_class=AssetClass.CRYPTO,
-                                       instrument_type=None, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst_crypto,
+            query="",
+            asset_class=AssetClass.CRYPTO,
+            instrument_type=None,
+            quote=None,
+            exchange=None,
+        )
         assert result is True
 
     def test_search_match_instrument_type(self):
         """Test _search_match with instrument_type filter."""
         adapter = MassiveAdapter()
         inst_spot = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         inst_cfd = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.CFD,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.CFD,
         )
         # Matching SPOT
-        result = adapter._search_match(inst_spot, query="", asset_class=None,
-                                       instrument_type=InstrumentType.SPOT, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst_spot,
+            query="",
+            asset_class=None,
+            instrument_type=InstrumentType.SPOT,
+            quote=None,
+            exchange=None,
+        )
         assert result is True
         # CFD should not match SPOT filter
-        result = adapter._search_match(inst_cfd, query="", asset_class=None,
-                                       instrument_type=InstrumentType.SPOT, quote=None, exchange=None)
+        result = adapter._search_match(
+            inst_cfd,
+            query="",
+            asset_class=None,
+            instrument_type=InstrumentType.SPOT,
+            quote=None,
+            exchange=None,
+        )
         assert result is False
 
     def test_search_match_quote(self):
         """Test _search_match with quote filter."""
         adapter = MassiveAdapter()
         inst_usd = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         inst_eur = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="EUR",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="EUR",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         # Matching USD
-        result = adapter._search_match(inst_usd, query="", asset_class=None,
-                                       instrument_type=None, quote="USD", exchange=None)
+        result = adapter._search_match(
+            inst_usd, query="", asset_class=None, instrument_type=None, quote="USD", exchange=None
+        )
         assert result is True
         # EUR should not match USD filter
-        result = adapter._search_match(inst_eur, query="", asset_class=None,
-                                       instrument_type=None, quote="USD", exchange=None)
+        result = adapter._search_match(
+            inst_eur, query="", asset_class=None, instrument_type=None, quote="USD", exchange=None
+        )
         assert result is False
 
     def test_search_match_exchange(self):
         """Test _search_match with exchange filter."""
         adapter = MassiveAdapter()
         inst_nms = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NMS", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NMS",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         inst_nyse = Instrument(
-            symbol="AAPL", provider_symbol="AAPL", exchange="NYSE", currency="USD",
-            asset_class=AssetClass.EQUITY, instrument_type=InstrumentType.SPOT,
+            symbol="AAPL",
+            provider_symbol="AAPL",
+            exchange="NYSE",
+            currency="USD",
+            asset_class=AssetClass.EQUITY,
+            instrument_type=InstrumentType.SPOT,
         )
         # Matching NMS
-        result = adapter._search_match(inst_nms, query="", asset_class=None,
-                                   instrument_type=None, quote=None, exchange="NMS")
+        result = adapter._search_match(
+            inst_nms, query="", asset_class=None, instrument_type=None, quote=None, exchange="NMS"
+        )
         assert result is True
         # NYSE should not match NMS filter
-        result = adapter._search_match(inst_nyse, query="", asset_class=None,
-                                   instrument_type=None, quote=None, exchange="NMS")
+        result = adapter._search_match(
+            inst_nyse, query="", asset_class=None, instrument_type=None, quote=None, exchange="NMS"
+        )
         assert result is False
 
     # -- fetch_fundamentals tests --
@@ -271,50 +339,85 @@ class TestMassiveAdapter:
         adapter = MassiveAdapter()
         # This test verifies the method exists and returns correct type
         # Actual data requires API key, so we just check the method signature
-        assert hasattr(adapter, 'fetch_fundamentals')
+        assert hasattr(adapter, "fetch_fundamentals")
         import inspect
+
         sig = inspect.signature(adapter.fetch_fundamentals)
-        assert 'symbol' in sig.parameters
+        assert "symbol" in sig.parameters
 
     def test_map_instrument_all_types(self):
         """Test map_instrument with all major market types."""
-        adapter = MassiveAdapter()
-
         # Stock
-        ticker = {"ticker": "AAPL", "name": "AAPL", "market": "stocks", "type": "stock",
-                  "primary_exchange": "NMS", "currency_name": "usd"}
+        ticker = {
+            "ticker": "AAPL",
+            "name": "AAPL",
+            "market": "stocks",
+            "type": "stock",
+            "primary_exchange": "NMS",
+            "currency_name": "usd",
+        }
         inst = map_instrument("AAPL", ticker)
         assert inst.asset_class == AssetClass.EQUITY
         assert inst.instrument_type == InstrumentType.SPOT
 
         # Crypto
-        ticker = {"ticker": "X:BTCUSD", "name": "BTC", "market": "crypto", "type": "perp",
-                  "primary_exchange": "Crypto", "currency_name": "usd"}
+        ticker = {
+            "ticker": "X:BTCUSD",
+            "name": "BTC",
+            "market": "crypto",
+            "type": "perp",
+            "primary_exchange": "Crypto",
+            "currency_name": "usd",
+        }
         inst = map_instrument("X:BTCUSD", ticker)
         assert inst.asset_class == AssetClass.CRYPTO
 
         # Forex
-        ticker = {"ticker": "C:EURUSD", "name": "EURUSD", "market": "forex", "type": "forex",
-                  "primary_exchange": "IDE", "currency_name": "usd"}
+        ticker = {
+            "ticker": "C:EURUSD",
+            "name": "EURUSD",
+            "market": "forex",
+            "type": "forex",
+            "primary_exchange": "IDE",
+            "currency_name": "usd",
+        }
         inst = map_instrument("C:EURUSD", ticker)
         assert inst.asset_class == AssetClass.FOREX
 
         # Indices
-        ticker = {"ticker": "I:SPX", "name": "SPX", "market": "indices", "type": "index",
-                  "primary_exchange": "CBOE", "currency_name": "usd"}
+        ticker = {
+            "ticker": "I:SPX",
+            "name": "SPX",
+            "market": "indices",
+            "type": "index",
+            "primary_exchange": "CBOE",
+            "currency_name": "usd",
+        }
         inst = map_instrument("I:SPX", ticker)
         assert inst.asset_class == AssetClass.INDEX
 
         # Options
-        ticker = {"ticker": "O:AAPL241220C00150000", "name": "AAPL Option", "market": "options",
-                  "type": "option", "primary_exchange": "CBOE", "currency_name": "usd"}
+        ticker = {
+            "ticker": "O:AAPL241220C00150000",
+            "name": "AAPL Option",
+            "market": "options",
+            "type": "option",
+            "primary_exchange": "CBOE",
+            "currency_name": "usd",
+        }
         inst = map_instrument("O:AAPL241220C00150000", ticker)
         assert inst.asset_class == AssetClass.EQUITY
         assert inst.instrument_type == InstrumentType.OPTION
 
         # Futures
-        ticker = {"ticker": "GCJ5", "name": "Gold", "market": "futures", "type": "future",
-                  "primary_exchange": "COMET", "currency_name": "usd"}
+        ticker = {
+            "ticker": "GCJ5",
+            "name": "Gold",
+            "market": "futures",
+            "type": "future",
+            "primary_exchange": "COMET",
+            "currency_name": "usd",
+        }
         inst = map_instrument("GCJ5", ticker)
         assert inst.asset_class == AssetClass.EQUITY
         assert inst.instrument_type == InstrumentType.FUTURE

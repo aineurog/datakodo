@@ -5,15 +5,15 @@ from datetime import datetime
 from typing import Any
 
 from datakodo.adapters.massive.config import MassiveConfig
-from datakodo.adapters.massive.mapper import map_ohlcv, map_instrument, map_trades
+from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv, map_trades
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, InstrumentType
-from datakodo.core.exceptions import DataNotAvailableError, NotSupportedError, SymbolNotFoundError
-from datakodo.core.schemas import Fundamentals
+from datakodo.core.exceptions import DataNotAvailableError, SymbolNotFoundError
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.core.schemas import Fundamentals
 from datakodo.ops.output import to_output_format
 from datakodo.ops.validation import validate_ohlcv
 
@@ -160,7 +160,6 @@ class MassiveAdapter(AdapterInterface):
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on Massive.")
 
         tick = info.get("tick")
-        offset_seconds = info.get("server_offset_seconds", 0)
 
         # Map the ticker details to canonical Fundamentals
         fundamentals = Fundamentals(
@@ -213,10 +212,11 @@ class MassiveAdapter(AdapterInterface):
         if not ts:
             return None
         import datetime as _dt
+
         value = int(ts)
         if abs(value) > 10**15:
             value = value // 1_000_000  # ns -> ms
-        return _dt.datetime.fromtimestamp(value, tz=_dt.timezone.utc)
+        return _dt.datetime.fromtimestamp(value, tz=_dt.UTC)
 
     # -- historical (sync) --
 

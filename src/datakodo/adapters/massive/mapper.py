@@ -10,9 +10,9 @@ from typing import Any
 
 import pandas as pd
 
-from datakodo.core.schemas import Trade, resolve_ohlcv_columns
 from datakodo.core.enums import AssetClass, InstrumentType
 from datakodo.core.instruments import Instrument
+from datakodo.core.schemas import Trade, resolve_ohlcv_columns
 from datakodo.core.timeframe import timeframe_delta
 
 # Optional columns Massive can supply on top of the canonical base (design sec 3).
@@ -177,7 +177,6 @@ def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = Non
     - ``futures``      -> ``asset_class=EQUITY``, ``instrument_type=FUTURE``
     """
     raw_ticker = (ticker.get("ticker") or "").upper()
-    name = ticker.get("name") or ""
     massive_market = (ticker.get("market") or "").lower()
     massive_type = (ticker.get("type") or "").lower()
     exchange = ticker.get("primary_exchange") or ""

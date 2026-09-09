@@ -6,7 +6,7 @@ truth for the duration of each canonical timeframe, used centrally (e.g. to
 decide when a candle/bar is closed and to size pagination windows).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from datakodo.core.enums import Timeframe
 
@@ -109,13 +109,13 @@ def resolve_date_range(
     ``end``.
     """
     if end is None:
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
     elif end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
+        end = end.replace(tzinfo=UTC)
     if start is None:
         start = end - timedelta(days=days)
     elif start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
+        start = start.replace(tzinfo=UTC)
     if start > end:
         raise ValueError(f"start ({start}) must not be after end ({end}).")
     return start, end

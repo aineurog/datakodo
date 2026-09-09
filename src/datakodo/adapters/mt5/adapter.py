@@ -93,12 +93,12 @@ class MT5Adapter(AdapterInterface):
     def instrument(self, symbol: str, market_type: str = "") -> Instrument:
         """Classify ``symbol`` as spot, futures, forex, CFD, etc.
 
-        MT5 symbols are self-describing: ``symbol_info`` returns the broker's
-        symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
-        sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
-        ``"futures"``) that is validated against the detected classification -
-        a mismatch raises ``ProviderError``. An unknown symbol raises
-``SymbolNotFoundError`` (design doc sec 16).
+                MT5 symbols are self-describing: ``symbol_info`` returns the broker's
+                symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
+                sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
+                ``"futures"``) that is validated against the detected classification -
+                a mismatch raises ``ProviderError``. An unknown symbol raises
+        ``SymbolNotFoundError`` (design doc sec 16).
         """
         symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
