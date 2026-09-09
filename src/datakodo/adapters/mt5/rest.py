@@ -142,6 +142,23 @@ class MT5REST:
         raw = tick.time - time.time()
         return int(round(raw / 3600.0)) * 3600
 
+    def server_now(self, symbol: str, *, offset_seconds: int | None = None) -> datetime:
+        """Current time according to the MT5 server, as UTC.
+
+        Derived from the latest tick (``tick.time`` is a server-epoch value)
+        minus the server offset — the PC clock is never consulted, so a
+        drifted PC clock cannot corrupt bar-closed decisions downstream.
+        Falls back to the wall clock when no tick is available.
+        """
+        offset = offset_seconds
+        if offset is None:
+            offset = self.server_offset_seconds(symbol)
+        tick = self._ready().symbol_info_tick(symbol)
+        tick_time = getattr(tick, "time", None) if tick is not None else None
+        if tick_time is None:
+            return datetime.now(UTC)
+        return datetime.fromtimestamp(int(tick_time) - offset, tz=UTC)
+
     def copy_rates_range(
         self,
         symbol: str,
@@ -163,6 +180,12 @@ class MT5REST:
         still in server time) or ``None`` when the terminal has no history
         in the requested window. A symbol unknown to the terminal raises
         ``SymbolNotFoundError`` (via ``last_error()``).
+
+        An empty window is retried with backoff: the terminal downloads
+        history in the background, so a first-empty result often fills in
+        seconds later. This holds whether the market is open or closed —
+        historical bars are served from the terminal either way, so a
+        closed market is never treated as "no data".
         """
         start_utc = _as_utc(start)
         end_utc = _as_utc(end)
@@ -174,30 +197,80 @@ class MT5REST:
             shift = timedelta(seconds=offset)
             return mt5.copy_rates_range(symbol, timeframe, start_utc + shift, end_utc + shift)
 
-        rates = self._with_retry(1, _copy)
-        if rates is None or len(rates) == 0:
-            code, description = self._ready().last_error()
-            if self._is_unknown_symbol(code, description):
-                raise SymbolNotFoundError(
-                    f"Symbol {symbol!r} not found on MT5: {description or f'code {code}'}"
+        max_retries = self._config.max_retries
+        base_delay = self._config.retry_base_delay
+        rates = None
+        for attempt in range(max_retries + 1):
+            rates = self._with_retry(1, _copy)
+            if rates is not None and len(rates) > 0:
+                return rates
+            if attempt < max_retries:
+                delay = base_delay * (2**attempt)
+                logger.info(
+                    "No %s history yet for [%s \u2192 %s] (attempt %d/%d); "
+                    "history downloads in the background, retrying in %.1fs.",
+                    symbol,
+                    start_utc.isoformat(),
+                    end_utc.isoformat(),
+                    attempt + 1,
+                    max_retries + 1,
+                    delay,
                 )
-            # No history in the terminal for this window. This usually means
-            # the symbol's chart was never opened (download is still running
-            # in the background), or 'Max. bars in chart' is set too low for
-            # the requested window.
-            logger.warning(
-                "No %s history returned for %s [%s \u2192 %s]. "
-                "Data is downloading in the background - this may take some "
-                "time. Open the %s chart in MT5 (or raise 'Max. bars in "
-                "chart') to speed it up.",
-                symbol,
-                timeframe,
-                start_utc.isoformat(),
-                end_utc.isoformat(),
-                symbol,
+                time.sleep(delay)
+        code, description = self._ready().last_error()
+        if self._is_unknown_symbol(code, description):
+            raise SymbolNotFoundError(
+                f"Symbol {symbol!r} not found on MT5: {description or f'code {code}'}"
             )
+        # No history in the terminal for this window. This usually means
+        # the symbol's chart was never opened (download is still running
+        # in the background), or 'Max. bars in chart' is set too low for
+        # the requested window.
+        logger.warning(
+            "No %s history returned for %s [%s \u2192 %s]. "
+            "Data is downloading in the background - this may take some "
+            "time. Open the %s chart in MT5 (or raise 'Max. bars in "
+            "chart') to speed it up.",
+            symbol,
+            timeframe,
+            start_utc.isoformat(),
+            end_utc.isoformat(),
+            symbol,
+        )
+        return None
+
+    def available_range(
+        self, symbol: str, timeframe: int, *, offset_seconds: int | None = None
+    ) -> tuple[datetime, datetime] | None:
+        """Probe the terminal for the oldest/newest bar it holds (UTC).
+
+        Uses ``copy_rates_from_pos(..., 0, 1)`` for the newest bar and
+        ``copy_rates_from(..., epoch, 1)`` for the oldest bar. Returns
+        ``(oldest_utc, newest_utc)`` or ``None`` when the probe fails.
+        Callers use this to distinguish "terminal has nothing" from
+        "requested window missed the held history", and to clamp a
+        request to the overlap instead of failing outright.
+        """
+        try:
+            offset = offset_seconds
+            if offset is None:
+                offset = self.server_offset_seconds(symbol)
+            shift = timedelta(seconds=offset)
+
+            def _probe(mt5: Any) -> Any:
+                newest = mt5.copy_rates_from_pos(symbol, timeframe, 0, 1)
+                oldest = mt5.copy_rates_from(symbol, timeframe, datetime(2000, 1, 1) + shift, 1)
+                return newest, oldest
+
+            newest, oldest = self._with_retry(1, _probe)
+            if newest is None or len(newest) == 0 or oldest is None or len(oldest) == 0:
+                return None
+            newest_utc = datetime.fromtimestamp(int(newest[-1]["time"]) - offset, tz=UTC)
+            oldest_utc = datetime.fromtimestamp(int(oldest[0]["time"]) - offset, tz=UTC)
+            return oldest_utc, newest_utc
+        except Exception:
+            logger.debug("MT5 history probe failed for %s", symbol, exc_info=True)
             return None
-        return rates
 
     # -- symbol metadata (spot vs futures classification) --
 

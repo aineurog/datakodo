@@ -6,6 +6,8 @@ timestamps, no gaps or duplicates, and an ``is_closed`` flag on every bar.
 Validation failures raise ``DataValidationError`` (design doc sec 18).
 """
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
@@ -14,7 +16,7 @@ from datakodo.core.exceptions import DataValidationError
 from datakodo.core.timeframe import timeframe_delta
 
 
-def add_is_closed(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+def add_is_closed(df: pd.DataFrame, timeframe: str, *, now: datetime | None = None) -> pd.DataFrame:
     """Append an ``is_closed`` column marking whether each bar is final.
 
     A bar whose ``timestamp`` holds its **open** time is closed once
@@ -22,12 +24,16 @@ def add_is_closed(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     forming at call time are marked ``False``; every bar is ``True`` when the
     range lies fully in the past. Returns a copy; the input is untouched.
 
+    ``now`` defaults to the wall clock, but callers with a server-side clock
+    (e.g. MT5's tick time) should pass it explicitly so a drifted PC clock
+    can neither drop real closed bars nor keep forming ones.
+
     Raises ``ValueError`` for an unknown ``timeframe``.
     """
     if "timestamp" not in df.columns:
         return df.assign(is_closed=True)
     delta = timeframe_delta(timeframe)
-    now = pd.Timestamp.now(tz="UTC")
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
     ts = df["timestamp"]
     if ts.dt.tz is None:
         ts = ts.dt.tz_localize("UTC")
