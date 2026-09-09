@@ -143,7 +143,7 @@ class MassiveAdapter(AdapterInterface):
             return False
         return True
 
-    def fetch_fundamentals(self, symbol: str) -> Fundamentals:
+    def fetch_fundamentals(self, symbol: str | Instrument, **kwargs: Any) -> Fundamentals:
         """Fetch canonical fundamentals / reference data for ``symbol``.
 
         Combines ``ticker_details`` (currencies, description, classification)
@@ -154,8 +154,8 @@ class MassiveAdapter(AdapterInterface):
         This reuses the ``ticker_details()`` endpoint already implemented for
         search (Step 3), following the design doc's Step 5 order.
         """
-        symbol = self._rest.ensure_symbol_known(symbol)
-        info = self._rest.ticker_details(symbol=symbol)
+        symbol = self._rest.ensure_symbol_known(symbol_of(symbol))
+        info = self._rest.ticker_details(symbol)
         if not info:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on Massive.")
 
@@ -266,7 +266,7 @@ class MassiveAdapter(AdapterInterface):
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
         return to_output_format(df, output_format or self._config.output_format)
 
-    def fetch_ticks(  # type: ignore[override]  # typed signature narrower than base
+    def fetch_ticks(
         self,
         symbol: str | Instrument,
         start: datetime | None = None,

@@ -324,6 +324,15 @@ class MassiveREST(RESTClient):
         )
         return [dict(vars(t)) for t in tickers]
 
+    def ensure_symbol_known(self, symbol: str) -> str:
+        """Normalize *symbol* for downstream calls.
+
+        Unlike MT5 there is no terminal watchlist to select into; existence
+        is proven by the following ``ticker_details`` call (404 maps to
+        ``SymbolNotFoundError``). Returns the stripped input unchanged.
+        """
+        return symbol.strip()
+
     def ticker_details(self, ticker: str) -> dict:
         """Fetch the single-ticker overview for ``ticker`` as a raw dict."""
         logger.info("Fetching Massive ticker details for %s", ticker)

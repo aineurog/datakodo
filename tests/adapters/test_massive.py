@@ -1,8 +1,6 @@
 """Massive adapter tests."""
 
-from datetime import UTC, datetime
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 from datakodo.adapters.massive.adapter import MassiveAdapter
 from datakodo.adapters.massive.mapper import map_instrument
@@ -17,12 +15,31 @@ class TestMassiveAdapter:
         assert adapter.supports_streaming_orderbook is False
         assert adapter.supports_fundamentals is True
 
-    def test_fetch_ohlcv_not_implemented_yet(self):
-
-        adapter = MassiveAdapter()
+    def test_fetch_ohlcv_mocked(self, monkeypatch):
+        """fetch_ohlcv maps mocked aggs to the canonical frame (offline)."""
+        adapter = MassiveAdapter(api_key="test-key")
         now = datetime.now(UTC)
-        with pytest.raises(NotImplementedError):
-            adapter.fetch_ohlcv("AAPL", "1h", now, now)
+        raw = [
+            {
+                "t": int((now - timedelta(hours=3)).timestamp() * 1000),
+                "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5,
+                "v": 1000.0, "vw": 100.2, "n": 10, "otc": None,
+            },
+            {
+                "t": int((now - timedelta(hours=2)).timestamp() * 1000),
+                "o": 100.5, "h": 102.0, "l": 100.0, "c": 101.5,
+                "v": 2000.0, "vw": 101.0, "n": 20, "otc": None,
+            },
+        ]
+        monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: raw)
+        df = adapter.fetch_ohlcv("AAPL", "1h", now - timedelta(hours=4), now)
+        assert list(df.columns) == [
+            "timestamp", "open", "high", "low", "close", "volume", "is_closed",
+        ]
+        assert len(df) == 2
+        assert df["is_closed"].all()
+        assert df.iloc[0]["open"] == 100.0
+        assert df.iloc[-1]["close"] == 101.5
 
     # -- map_instrument tests --
 
