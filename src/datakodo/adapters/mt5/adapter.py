@@ -191,8 +191,8 @@ class MT5Adapter(AdapterInterface):
         self,
         symbol: str | Instrument,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns: str | Sequence[str] = "basic",
         include_live: bool = False,
@@ -227,7 +227,12 @@ class MT5Adapter(AdapterInterface):
         stitched by ``ops.pagination.paginate`` (design doc sec 12), so a
         single call transparently covers ranges larger than the terminal's
         loaded chart history.
+
+        Omit ``start``/``end`` for the last 30 days (``end`` = now UTC).
         """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         mt5_tf = _to_mt5_timeframe(timeframe)
         tf = Timeframe(timeframe)
