@@ -14,6 +14,7 @@ Requests are stateless, so one ``MassiveREST`` instance is safe to share
 across threads (design doc sec 23).
 """
 
+import json
 import logging
 import time
 from datetime import UTC, datetime
@@ -98,24 +99,44 @@ class MassiveREST(RESTClient):
             pagination=True,  # follow next_url automatically.
         )
 
+    @staticmethod
+    def _server_message(resp: Any) -> str | None:
+        """Extract the server's human-readable ``message`` field, if any.
+
+        Keeps the useful part of an error body (e.g. which timeframe the
+        plan excludes) while dropping protocol noise like ``request_id``.
+        """
+        data = getattr(resp, "data", b"")
+        if not isinstance(data, bytes):
+            return None
+        try:
+            body = json.loads(data.decode("utf-8"))
+        except ValueError:
+            return None
+        message = body.get("message") if isinstance(body, dict) else None
+        return str(message) if message else None
+
     def _translate_response(self, resp: Any) -> DataLibError:
-        """Map a non-200 Massive response onto the DataKodo hierarchy."""
+        """Map a non-200 Massive response onto the DataKodo hierarchy.
+
+        Messages are professional one-liners (design doc sec 16): what
+        happened plus what to do — never a raw JSON dump.
+        """
         status = getattr(resp, "status", 0)
-        body = resp.data.decode("utf-8", errors="replace") if hasattr(resp, "data") else ""
-        message = f"Massive HTTP {status}: {body[:200]}"
+        detail = self._server_message(resp)
+        suffix = f" Server says: {detail}" if detail else ""
 
         if status == 400:
-            return DataValidationError(message)
+            return DataValidationError(f"Massive rejected the request (HTTP 400).{suffix}")
         if status == 401:
-            return AuthenticationError(
-                f"Massive authentication failed ({status}). Check MASSIVE_API_KEY. {body[:200]}"
-            )
+            return AuthenticationError("Massive authentication failed. Check MASSIVE_API_KEY.")
         if status == 403:
             return PaidTierRequiredError(
-                f"Massive: endpoint requires a paid tier ({status}). {body[:200]}"
+                "Massive endpoint requires a paid tier (HTTP 403). "
+                f"Upgrade: https://massive.com/pricing.{suffix}"
             )
         if status == 404:
-            return SymbolNotFoundError(f"Massive ticker not found ({status}). {body[:200]}")
+            return SymbolNotFoundError("Massive ticker not found (HTTP 404).")
         if status == 429:
             retry_after = 0.0
             headers = getattr(resp, "headers", None)
@@ -124,8 +145,11 @@ class MassiveREST(RESTClient):
                     retry_after = float(headers.get("Retry-After"))
                 except (TypeError, ValueError):
                     retry_after = 0.0
-            return RateLimitError(message, retry_after=retry_after)
-        return ProviderError(message)
+            return RateLimitError(
+                f"Massive rate limit exceeded (HTTP 429). Retry after {retry_after:.0f}s.",
+                retry_after=retry_after,
+            )
+        return ProviderError(f"Massive request failed (HTTP {status}).{suffix}")
 
     def _get(
         self,
