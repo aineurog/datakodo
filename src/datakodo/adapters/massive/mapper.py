@@ -24,6 +24,20 @@ _SESSION_MARKETS = ("stocks", "index", "options", "futures")
 # Crypto trade condition codes (socket XT.*): 1 = sell side, 2 = buy side.
 _CRYPTO_SIDE = {1: "sell", 2: "buy"}
 
+# Raw Massive agg key -> canonical column name. Any key NOT in here is
+# passed through as-is, so new/asset-specific fields need no code change.
+_RAW_MAP = {
+    "t": "timestamp",
+    "o": "open",
+    "h": "high",
+    "l": "low",
+    "c": "close",
+    "v": "volume",
+    "vw": "vwap",
+    "n": "trades_count",
+    "otc": "otc",
+}
+
 
 def _to_ms(value: int | str) -> int:
     """Normalize a Unix timestamp to milliseconds.
@@ -38,12 +52,17 @@ def _to_ms(value: int | str) -> int:
     return value
 
 
+def _safe_float(value: Any) -> float | None:
+    """Convert to float, returning None instead of raising on None."""
+    return float(value) if value is not None else None
+
+
 def _session_for(market: str) -> str | None:
     """Session label for a Massive market; None for 24/7 markets.
 
     Massive stock aggregates fold pre/regular/post sessions into one bar, so the
     label is always ``"regular"`` for sessioned markets; crypto/forex trade
-    around the clock and carry no session (design sec 3).
+    around the clock and carry no session (design doc sec 3).
     """
     return "regular" if market in _SESSION_MARKETS else None
 
@@ -62,35 +81,71 @@ def map_ohlcv(
         {"t": unix_ms, "o": open, "h": high, "l": low, "c": close,
          "v": volume, "vw": vwap, "n": trades, "otc": bool}
 
-    Massive does not send an open/closed flag, so it is derived: a bar whose
-    open time plus one candle is still in the future is marked not closed
-    (design sec 18). ``columns`` selects the schema - ``"basic"`` (default),
-    ``"all"``, or an explicit list of extra columns.
+    Every key the endpoint returns is mapped (known keys via ``_RAW_MAP``,
+    unknown keys passed through verbatim), so Forex/Crypto/Indices/Options
+    differences need no code change. Massive does not send an open/closed
+    flag, so it is derived: a bar whose open time plus one candle is still
+    in the future is marked not closed (design sec 18).
+
+    ``columns`` selects the schema - ``"basic"`` (default) returns the
+    invariant minimum; ``"all"`` returns base plus every extra the endpoint
+    actually provided; a list requests specific extras.
     """
-    available = MASSIVE_OHLCV_EXTRAS
-    resolved = resolve_ohlcv_columns(columns, available)
+    base = ["timestamp", "open", "high", "low", "close", "volume", "is_closed"]
 
     if not raw:
-        return pd.DataFrame(columns=resolved)
+        return pd.DataFrame(
+            {
+                "timestamp": pd.Series(dtype="datetime64[ns, UTC]"),
+                "open": pd.Series(dtype="float64"),
+                "high": pd.Series(dtype="float64"),
+                "low": pd.Series(dtype="float64"),
+                "close": pd.Series(dtype="float64"),
+                "volume": pd.Series(dtype="float64"),
+                "is_closed": pd.Series(dtype="bool"),
+            }
+        )
 
     rows = []
     for r in raw:
-        rows.append(
-            {
-                "timestamp": pd.Timestamp(_to_ms(r["t"]), unit="ms", tz="UTC"),
-                "open": float(r["o"]),
-                "high": float(r["h"]),
-                "low": float(r["l"]),
-                "close": float(r["c"]),
-                "volume": float(r["v"]),
-                "session": _session_for(market),
-                "vwap": r.get("vw"),
-                "trades_count": r.get("n"),
-            }
-        )
+        row: dict[str, Any] = {}
+        # Map every key the endpoint sent; known keys get canonical names,
+        # unknown keys pass through verbatim (dynamic per asset type).
+        for key, value in r.items():
+            name = _RAW_MAP.get(key, key)
+            if name == "timestamp":
+                row[name] = pd.Timestamp(_to_ms(value), unit="ms", tz="UTC")
+            elif name in ("open", "high", "low", "close", "volume", "vwap"):
+                row[name] = _safe_float(value)
+            else:
+                row[name] = value
+        # Derived fields (not sent by endpoint).
+        row["session"] = _session_for(market)
+        rows.append(row)
+
     df = pd.DataFrame(rows)
+
+    # Ensure base columns exist even if endpoint omitted them.
+    for col in ("open", "high", "low", "close", "volume"):
+        if col not in df.columns:
+            df[col] = None
+        df[col] = df[col].astype("float64")
+    if "timestamp" not in df.columns:
+        df["timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
+
     df["is_closed"] = df["timestamp"] + timeframe_delta(timeframe) <= pd.Timestamp.now(tz="UTC")
-    return df[resolved]
+
+    # columns="all": base + every extra the endpoint actually provided.
+    if columns == "all":
+        extras = [c for c in df.columns if c not in base]
+        ordered_extras = [c for c in ("session", "vwap", "trades_count", "otc") if c in extras]
+        ordered_extras += [c for c in extras if c not in ordered_extras]
+        return df[base + ordered_extras]
+
+    # basic / explicit list: delegate to canonical resolver.
+    available = tuple(c for c in MASSIVE_OHLCV_EXTRAS if c in df.columns)
+    resolved = resolve_ohlcv_columns(columns, available)
+    return df[[c for c in resolved if c in df.columns]]
 
 
 def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = None) -> Instrument:
