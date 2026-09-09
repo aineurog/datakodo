@@ -125,6 +125,15 @@ def map_ohlcv(
 
     df = pd.DataFrame(rows)
 
+    # Stitch pages: drop duplicate bars on timestamp so a next_url overlap
+    # never produces a duplicate bar (design doc sec 12).
+    if "timestamp" in df.columns:
+        df = (
+            df.drop_duplicates(subset="timestamp", keep="last")
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
+
     # Ensure base columns exist even if endpoint omitted them.
     for col in ("open", "high", "low", "close", "volume"):
         if col not in df.columns:
