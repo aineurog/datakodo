@@ -233,6 +233,42 @@ def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = Non
     return inst
 
 
+def map_rest_trades(rows: list[dict[str, Any]]) -> list[Trade]:
+    """Convert raw REST ``list_trades`` records to canonical ``Trade`` list.
+
+    REST shape (unlike the socket shape in ``map_trades``)::
+
+        {"price": float, "size": float, "sip_timestamp": ns,
+         "participant_timestamp": ns, "id": str, "conditions": [...]}
+
+    Timestamps are nanoseconds (``_to_ms`` scales down); stocks carry no
+    aggressor side so ``side`` stays None. Non-numeric ``id`` values map to
+    ``trade_id=None`` instead of raising.
+    """
+    trades: list[Trade] = []
+    for r in rows:
+        ts = r.get("sip_timestamp") or r.get("participant_timestamp") or r.get("t")
+        raw_id = r.get("id")
+        try:
+            trade_id = int(raw_id) if raw_id is not None else None
+        except (TypeError, ValueError):
+            trade_id = None
+        price = r.get("price")
+        size = r.get("size")
+        if price is None or size is None:
+            continue
+        trades.append(
+            Trade(
+                timestamp=pd.Timestamp(_to_ms(ts or 0), unit="ms", tz="UTC"),
+                price=float(price),
+                size=float(size),
+                side=None,
+                trade_id=trade_id,
+            )
+        )
+    return trades
+
+
 def map_trades(raw: dict[str, Any]) -> Trade:
     """Convert a raw Massive trade message into a canonical Trade.
 

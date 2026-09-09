@@ -166,8 +166,8 @@ class BinanceAdapter(AdapterInterface):
         self,
         symbol: str,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns: str | list[str] = "basic",
         market_type: str = "",
@@ -193,7 +193,12 @@ class BinanceAdapter(AdapterInterface):
         ``output_format`` selects the user-facing representation (design doc
         sec 13): pandas (default), polars, or arrow — a per-call override of
         ``Config.output_format``.
+
+        Omit ``start``/``end`` for the last 30 days (``end`` = now UTC).
         """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market_type = market_type or self._binance.market_type
         tf = Timeframe(timeframe)

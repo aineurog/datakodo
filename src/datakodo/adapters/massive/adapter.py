@@ -224,8 +224,8 @@ class MassiveAdapter(AdapterInterface):
         self,
         symbol: str | Instrument,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns: str | list[str] = "basic",
         include_live: bool = False,
@@ -234,15 +234,20 @@ class MassiveAdapter(AdapterInterface):
     ) -> Any:
         """Fetch OHLCV candles for a date range (design doc sec 3, 18).
 
-        ``columns`` selects the schema: ``"basic"`` (default) returns the
-        invariant minimum; ``"all"`` adds the Massive extras (``session``,
-        ``vwap``, ``trades_count``); a list requests specific extras.
+        ``start``/``end`` default to the last 30 days (``end`` = now UTC);
+        omit both for the latest data. ``columns`` selects the schema:
+        ``"basic"`` (default) returns the invariant minimum; ``"all"`` adds
+        the Massive extras (``session``, ``vwap``, ``trades_count``); a list
+        requests specific extras.
 
         By default only fully closed bars are returned (design doc sec 18);
         set ``include_live=True`` to keep the still-forming bar, marked
         ``is_closed=False``. ``output_format`` overrides ``Config.output_format``
         (pandas by default).
         """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market = self._market_of(symbol)
         raw = self._rest.aggs(symbol, timeframe, start, end)
@@ -260,6 +265,31 @@ class MassiveAdapter(AdapterInterface):
         validate_ohlcv(df)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
         return to_output_format(df, output_format or self._config.output_format)
+
+    def fetch_ticks(  # type: ignore[override]  # typed signature narrower than base
+        self,
+        symbol: str | Instrument,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        *,
+        limit: int = 1000,
+        **kwargs,
+    ) -> Any:
+        """Fetch historical trade ticks mapped to canonical ``Trade`` records.
+
+        Uses the REST ``list_trades`` endpoint with ``timestamp.gte/lte``
+        bounds (design doc sec 7: heavy volume, chunked pagination, opt-in).
+        Without ``start`` the most recent trades are fetched in a single
+        call. Tick history is often paid-tier gated — that surfaces as
+        ``PaidTierRequiredError``, never faked data (design doc sec 2/22).
+        """
+        from datakodo.adapters.massive.mapper import map_rest_trades
+
+        symbol = symbol_of(symbol)
+        raw = self._rest.list_trades(symbol, start, end, limit=limit)
+        trades = map_rest_trades(raw)
+        logger.info("Fetched %d trades for %s", len(trades), symbol)
+        return trades
 
     # -- streaming (async) --
 

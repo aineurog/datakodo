@@ -393,3 +393,41 @@ class MassiveREST:
         logger.info("Fetching Massive ticker details for %s", ticker)
         details = self._client.get_ticker_details(ticker=ticker)
         return dict(vars(details)) if details else {}
+
+    # -- Historical ticks (design doc sec 7: chunked, opt-in) --
+
+    def list_trades(
+        self,
+        ticker: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> list:
+        """Fetch raw historical trades for ``ticker`` (design doc sec 7).
+
+        Uses the official ``list_trades`` endpoint with ``timestamp.gte/lte``
+        bounds; pagination follows ``next_url`` through the shared helper.
+        Each row is the raw record dict (``price``, ``size``,
+        ``sip_timestamp``/``participant_timestamp`` (ns), ``id``,
+        ``conditions``, ``exchange``, ...); the mapper converts them to
+        canonical ``Trade`` records. Tick history is heavy volume and often
+        paid-tier gated — callers get ``PaidTierRequiredError`` honestly
+        instead of faked data (design doc sec 2/22).
+        """
+        logger.info(
+            "Fetching Massive trades for %s [%s -> %s] limit=%s",
+            ticker,
+            start.isoformat() if start else None,
+            end.isoformat() if end else None,
+            limit,
+        )
+        trades = self._client.list_trades(
+            ticker=ticker,
+            timestamp_gte=_to_millis(start) if start is not None else None,
+            timestamp_lte=_to_millis(end) if end is not None else None,
+            limit=max(1, min(limit, 50_000)),
+            sort="timestamp",
+            order="asc",
+        )
+        return [dict(vars(t)) for t in trades]

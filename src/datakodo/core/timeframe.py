@@ -6,7 +6,7 @@ truth for the duration of each canonical timeframe, used centrally (e.g. to
 decide when a candle/bar is closed and to size pagination windows).
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from datakodo.core.enums import Timeframe
 
@@ -89,3 +89,33 @@ def timeframe_delta(timeframe: Timeframe | str) -> timedelta:
     if delta is None:
         raise ValueError(f"Unknown timeframe: {timeframe}")
     return delta
+
+
+DEFAULT_FETCH_DAYS = 30
+"""Default lookback when ``fetch_ohlcv`` is called without dates."""
+
+
+def resolve_date_range(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    days: int = DEFAULT_FETCH_DAYS,
+) -> tuple[datetime, datetime]:
+    """Resolve an optional ``(start, end)`` pair to concrete UTC datetimes.
+
+    Rules (shared by every adapter and the ``Client`` facade, so the
+    behaviour is identical everywhere): missing ``end`` means now (UTC);
+    missing ``start`` means ``end`` minus ``days`` (default 30). Naive
+    datetimes are assumed UTC. Raises ``ValueError`` if ``start`` is after
+    ``end``.
+    """
+    if end is None:
+        end = datetime.now(timezone.utc)
+    elif end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    if start is None:
+        start = end - timedelta(days=days)
+    elif start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if start > end:
+        raise ValueError(f"start ({start}) must not be after end ({end}).")
+    return start, end
