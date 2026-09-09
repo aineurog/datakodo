@@ -9,7 +9,8 @@ from datakodo.adapters.massive.mapper import map_ohlcv, map_instrument, map_trad
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
-from datakodo.core.exceptions import NotSupportedError, SymbolNotFoundError
+from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.exceptions import DataNotAvailableError, NotSupportedError, SymbolNotFoundError
 from datakodo.core.schemas import Fundamentals
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
