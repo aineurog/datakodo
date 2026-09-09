@@ -22,6 +22,7 @@ from typing import Any
 
 from massive.rest import RESTClient
 from urllib3.exceptions import HTTPError as Urllib3HTTPError
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
 
 from datakodo.adapters.massive.config import MassiveConfig
 from datakodo.core.config import Config
@@ -37,6 +38,7 @@ from datakodo.core.exceptions import (
     RateLimitError,
     RetriesExhaustedError,
     SymbolNotFoundError,
+    TimeoutError,
 )
 from datakodo.core.timeframe import MASSIVE_MAP
 from datakodo.ratelimit.limiter import TokenBucket
@@ -191,7 +193,12 @@ class MassiveREST(RESTClient):
                     retries=False,  # surface raw status; DataKodo owns retry logic
                 )
             except Urllib3HTTPError as exc:
-                translated: DataLibError = ConnectionError(f"Massive connection failed: {exc}")
+                # Timeouts stay distinct from connection failures: they carry
+                # different retry semantics (design doc sec 16).
+                if isinstance(exc, Urllib3TimeoutError):
+                    translated: DataLibError = TimeoutError(f"Massive request timed out: {exc}")
+                else:
+                    translated = ConnectionError(f"Massive connection failed: {exc}")
                 if attempt < max_retries:
                     delay = base_delay * (2**attempt)
                     logger.info(
