@@ -9,6 +9,7 @@ dist/
 build/
 demo_output/
 live_output/
+core_csv/
 
 *.claude
 *.commandcode

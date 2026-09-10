@@ -43,7 +43,7 @@ datakodo/
 │       │   │   ├── rest.py
 │       │   │   ├── ws.py
 │       │   │   └── mapper.py
-│       │   ├── polygon/
+│       │   ├── massive/
 │       │   │   ├── __init__.py
 │       │   │   ├── adapter.py
 │       │   │   ├── rest.py
@@ -95,7 +95,7 @@ datakodo/
 │   │   ├── test_binance_fetch.py    # live fetch script (manual run)
 │   │   ├── test_binance_live.py     # live WebSocket/REST check (manual run)
 │   │   ├── test_alpaca.py
-│   │   ├── test_polygon.py
+│   │   ├── test_massive.py
 │   │   ├── test_mt5.py
 │   │   └── test_ibkr.py
 │   ├── ops/
@@ -126,7 +126,7 @@ datakodo/
 - **`core/interfaces.py`** holds the `AdapterInterface` abstract base class plus the shared plumbing adapters inherit: `symbol_of()`, the default `fetch_ohlcv_batch()`, `search_instruments()`, lifecycle methods, and capability checking (`check_capability()` that raises `NotSupportedError`/`PaidTierRequiredError`).
 - **`ops/output.py`** is the single conversion point from the internal frame to the user-facing format (`pandas` default, `polars`, or `arrow`), so adapters never hand back raw provider data.
 - **`ops/corporate_actions.py`** is separate from `validation.py` since splits/dividends handling is non-trivial adjustment logic, not just a sanity check. Contains `adjust_ohlcv_for_splits(df, split_history)` and `adjust_ohlcv_for_dividends(df, dividend_history)`.
-- **Each adapter is a subpackage**, not a single file. The design doc names five Phase 1 providers (Binance, Alpaca, Polygon, MT5, IBKR — sec 24), and each needs REST, websocket, and mapping logic. A single file per adapter would collapse under that weight.
+- **Each adapter is a subpackage**, not a single file. The design doc names five Phase 1 providers (Binance, Alpaca, Massive, MT5, IBKR — sec 24), and each needs REST, websocket, and mapping logic. A single file per adapter would collapse under that weight.
 - **Adapter internal template**: `adapter.py` (implements the interface), `rest.py` (HTTP), `ws.py` (websocket), `mapper.py` (normalization). MT5 has `terminal.py` instead of `rest.py`/`ws.py` because it uses a COM based blocking terminal connection. IBKR uses `client.py` for the TWS callback client.
 - **`streaming/`** gives async streaming its own home — websocket reconnect patterns, snapshot+delta order book maintenance. Keeps adapter websocket code thin.
 - **`ops/`** groups resample, pagination, data quality validation, and corporate actions adjustments. These are cross cutting utilities that serve all adapters but are not part of the core contract.
