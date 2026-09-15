@@ -1,10 +1,15 @@
 """Massive adapter tests."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from datakodo.adapters.massive.adapter import MassiveAdapter
 from datakodo.adapters.massive.mapper import map_instrument
 from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.exceptions import AuthenticationError
+from datakodo.core.exceptions import ConnectionError as DataConnectionError
 from datakodo.core.instruments import Instrument
 
 
@@ -22,19 +27,37 @@ class TestMassiveAdapter:
         raw = [
             {
                 "t": int((now - timedelta(hours=3)).timestamp() * 1000),
-                "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5,
-                "v": 1000.0, "vw": 100.2, "n": 10, "otc": None,
+                "o": 100.0,
+                "h": 101.0,
+                "l": 99.0,
+                "c": 100.5,
+                "v": 1000.0,
+                "vw": 100.2,
+                "n": 10,
+                "otc": None,
             },
             {
                 "t": int((now - timedelta(hours=2)).timestamp() * 1000),
-                "o": 100.5, "h": 102.0, "l": 100.0, "c": 101.5,
-                "v": 2000.0, "vw": 101.0, "n": 20, "otc": None,
+                "o": 100.5,
+                "h": 102.0,
+                "l": 100.0,
+                "c": 101.5,
+                "v": 2000.0,
+                "vw": 101.0,
+                "n": 20,
+                "otc": None,
             },
         ]
         monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: raw)
         df = adapter.fetch_ohlcv("AAPL", "1h", now - timedelta(hours=4), now)
         assert list(df.columns) == [
-            "timestamp", "open", "high", "low", "close", "volume", "is_closed",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
         ]
         assert len(df) == 2
         assert df["is_closed"].all()
@@ -459,3 +482,126 @@ class TestMassiveAdapter:
         inst = map_instrument("GCJ5", ticker)
         assert inst.asset_class == AssetClass.EQUITY
         assert inst.instrument_type == InstrumentType.FUTURE
+
+
+# --- MassiveWS (mocked transport, offline) ---------------------------------
+
+
+class _FakeWSClient:
+    """Stand-in for ``massive.WebSocketClient`` (no network)."""
+
+    fail_auth = False
+
+    def __init__(self, api_key=None, market="stocks", raw=False, max_reconnects=5, **kwargs):
+        self.api_key = api_key
+        self.market = market
+        self.subscribed: list = []
+        self.unsubscribed: list = []
+        self.handler = None
+        self.closed = False
+
+    async def connect(self, handler, *args, **kwargs):
+        if self.fail_auth:
+            from massive.websocket import AuthError
+
+            raise AuthError("bad key")
+        self.handler = handler
+        await asyncio.Event().wait()
+
+    async def subscribe(self, *subs):
+        self.subscribed.extend(subs)
+
+    async def unsubscribe(self, *subs):
+        self.unsubscribed.extend(subs)
+
+    async def close(self):
+        self.closed = True
+
+
+def _make_ws(monkeypatch, **kwargs):
+    monkeypatch.setattr("datakodo.adapters.massive.ws.WebSocketClient", _FakeWSClient)
+    from datakodo.adapters.massive.ws import MassiveWS
+
+    return MassiveWS(api_key="test-key", **kwargs)
+
+
+class TestMassiveWS:
+    def test_market_routing(self):
+        from datakodo.adapters.massive.ws import MassiveWS
+
+        assert MassiveWS._market_for("AAPL") == "stocks"
+        assert MassiveWS._market_for("X:BTCUSD") == "crypto"
+        assert MassiveWS._market_for("C:EURUSD") == "forex"
+        assert MassiveWS._market_for("I:SPX") == "indices"
+        assert MassiveWS._market_for("O:AAPL1") == "options"
+
+    def test_trade_stream_yields_mapped_trades(self, monkeypatch):
+        ws = _make_ws(monkeypatch)
+
+        async def collect():
+            out = []
+            gen = ws.trade_stream("AAPL")
+            try:
+                async for trade in gen:
+                    out.append(trade)
+                    if len(out) == 2:
+                        break
+            finally:
+                await gen.aclose()
+            return out
+
+        async def drive():
+            task = asyncio.create_task(collect())
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if ws._client is not None and ws._client.handler is not None:
+                    break
+            fake = ws._client
+            import json as _json
+
+            frames = [
+                {"ev": "status", "status": "connected"},
+                {"ev": "T", "sym": "AAPL", "p": 150.0, "s": 10, "t": 1700000000000, "i": 1},
+                "not json",
+                {"ev": "T", "sym": "AAPL", "p": 151.0, "s": 5, "t": 1700000001000, "i": 2},
+                {"ev": "T", "sym": "AAPL", "s": 5},  # no price -> skipped
+            ]
+            for frame in frames:
+                await fake.handler(frame if isinstance(frame, str) else _json.dumps(frame))
+            trades = await asyncio.wait_for(task, 5)
+            subs = list(fake.subscribed)
+            unsubs = list(fake.unsubscribed)
+            await ws.disconnect()
+            return trades, subs, unsubs
+
+        trades, subs, unsubs = asyncio.run(drive())
+        assert [t.price for t in trades] == [150.0, 151.0]
+        assert [t.size for t in trades] == [10.0, 5.0]
+        assert subs == ["T.AAPL"]
+        assert unsubs == ["T.AAPL"]
+
+    def test_connect_auth_failure_maps(self, monkeypatch):
+        ws = _make_ws(monkeypatch)
+        monkeypatch.setattr(_FakeWSClient, "fail_auth", True)
+
+        async def go():
+            with pytest.raises(AuthenticationError):
+                await ws.connect("stocks")
+
+        try:
+            asyncio.run(go())
+        finally:
+            monkeypatch.setattr(_FakeWSClient, "fail_auth", False)
+
+    def test_disconnect_and_not_connected_guard(self, monkeypatch):
+        ws = _make_ws(monkeypatch)
+
+        async def go():
+            with pytest.raises(DataConnectionError):
+                await ws.subscribe("T", "AAPL")
+            await ws.connect("stocks")
+            assert ws.connected
+            await ws.disconnect()
+            assert not ws.connected
+
+        asyncio.run(go())
