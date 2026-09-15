@@ -484,6 +484,36 @@ class TestMassiveAdapter:
         assert inst.instrument_type == InstrumentType.FUTURE
 
 
+class TestMassiveAdapterStream:
+    def test_stream_trades_passes_through_mapped_trades(self, monkeypatch):
+        """Adapter yields ws Trades untouched (mapped once, in ``ws``)."""
+        from datetime import datetime
+
+        from datakodo.core.schemas import Trade
+
+        expected = Trade(
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            price=150.0,
+            size=10.0,
+            side=None,
+            trade_id=1,
+        )
+
+        class _FakeWS:
+            async def trade_stream(self, symbol):
+                assert symbol == "AAPL"
+                yield expected
+
+        adapter = MassiveAdapter(api_key="test-key")
+        adapter._ws = _FakeWS()
+
+        async def collect():
+            return [t async for t in adapter.stream_trades("AAPL")]
+
+        trades = asyncio.run(collect())
+        assert trades == [expected]
+
+
 # --- MassiveWS (mocked transport, offline) ---------------------------------
 
 
@@ -580,6 +610,113 @@ class TestMassiveWS:
         assert subs == ["T.AAPL"]
         assert unsubs == ["T.AAPL"]
 
+    def test_trade_stream_survives_string_trade_id(self, monkeypatch):
+        """A non-numeric trade id maps to None instead of killing the stream."""
+        ws = _make_ws(monkeypatch)
+
+        async def collect():
+            out = []
+            gen = ws.trade_stream("X:BTCUSD")
+            try:
+                async for trade in gen:
+                    out.append(trade)
+                    if len(out) == 2:
+                        break
+            finally:
+                await gen.aclose()
+            return out
+
+        async def drive():
+            task = asyncio.create_task(collect())
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if ws._client is not None and ws._client.handler is not None:
+                    break
+            fake = ws._client
+            import json as _json
+
+            await fake.handler(
+                _json.dumps(
+                    {
+                        "ev": "XT",
+                        "sym": "X:BTCUSD",
+                        "p": 70000.0,
+                        "s": 0.5,
+                        "t": 1700000000000,
+                        "i": "abc123",
+                        "c": 2,
+                    }
+                )
+            )
+            await fake.handler(
+                _json.dumps(
+                    {
+                        "ev": "XT",
+                        "sym": "X:BTCUSD",
+                        "p": 70001.0,
+                        "s": 0.1,
+                        "t": 1700000001000,
+                        "i": 456,
+                        "c": 1,
+                    }
+                )
+            )
+            trades = await asyncio.wait_for(task, 5)
+            await ws.disconnect()
+            return trades
+
+        trades = asyncio.run(drive())
+        assert [t.trade_id for t in trades] == [None, 456]
+        assert [t.side for t in trades] == ["buy", "sell"]
+
+    def test_trade_stream_drops_stale_queued_frames(self, monkeypatch):
+        """Frames queued by a previous symbol never leak into the next stream."""
+        ws = _make_ws(monkeypatch)
+        ws._queue.put_nowait(
+            {"ev": "T", "sym": "AAPL", "p": 1.0, "s": 1, "t": 1700000000000, "i": 1}
+        )
+
+        async def collect():
+            out = []
+            gen = ws.trade_stream("X:BTCUSD")
+            try:
+                async for trade in gen:
+                    out.append(trade)
+                    if len(out) == 1:
+                        break
+            finally:
+                await gen.aclose()
+            return out
+
+        async def drive():
+            task = asyncio.create_task(collect())
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if ws._client is not None and ws._client.handler is not None:
+                    break
+            fake = ws._client
+            import json as _json
+
+            await fake.handler(
+                _json.dumps(
+                    {
+                        "ev": "XT",
+                        "sym": "X:BTCUSD",
+                        "p": 70000.0,
+                        "s": 0.5,
+                        "t": 1700000002000,
+                        "i": 7,
+                    }
+                )
+            )
+            trades = await asyncio.wait_for(task, 5)
+            await ws.disconnect()
+            return trades
+
+        trades = asyncio.run(drive())
+        assert len(trades) == 1
+        assert trades[0].price == 70000.0
+
     def test_connect_auth_failure_maps(self, monkeypatch):
         ws = _make_ws(monkeypatch)
         monkeypatch.setattr(_FakeWSClient, "fail_auth", True)
@@ -605,3 +742,149 @@ class TestMassiveWS:
             assert not ws.connected
 
         asyncio.run(go())
+
+    def test_trade_channel_routing(self):
+        from datakodo.adapters.massive.ws import MassiveWS
+        from datakodo.core.exceptions import NotSupportedError
+
+        assert MassiveWS._trade_channel_for("AAPL") == "T"
+        assert MassiveWS._trade_channel_for("X:BTCUSD") == "XT"
+        assert MassiveWS._trade_channel_for("O:AAPL1") == "T"
+        with pytest.raises(NotSupportedError):
+            MassiveWS._trade_channel_for("C:EURUSD")
+        with pytest.raises(NotSupportedError):
+            MassiveWS._trade_channel_for("I:SPX")
+
+    def test_trade_stream_uses_xt_channel_for_crypto(self, monkeypatch):
+        ws = _make_ws(monkeypatch)
+
+        async def collect():
+            out = []
+            gen = ws.trade_stream("X:BTCUSD")
+            try:
+                async for trade in gen:
+                    out.append(trade)
+                    if len(out) == 1:
+                        break
+            finally:
+                await gen.aclose()
+            return out
+
+        async def drive():
+            task = asyncio.create_task(collect())
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if ws._client is not None and ws._client.handler is not None:
+                    break
+            fake = ws._client
+            import json as _json
+
+            await fake.handler(
+                _json.dumps(
+                    {
+                        "ev": "XT",
+                        "pair": "BTC-USD",
+                        "p": 70000.0,
+                        "s": 0.5,
+                        "t": 1700000000000,
+                        "i": 7,
+                        "c": [2],
+                    }
+                )
+            )
+            trades = await asyncio.wait_for(task, 5)
+            subs = list(fake.subscribed)
+            await ws.disconnect()
+            return trades, subs
+
+        trades, subs = asyncio.run(drive())
+        assert trades[0].side == "buy"
+        assert subs == ["XT.X:BTCUSD"]
+
+    def test_trade_stream_rejects_forex_and_indices(self, monkeypatch):
+        from datakodo.core.exceptions import NotSupportedError
+
+        ws = _make_ws(monkeypatch)
+
+        async def go():
+            with pytest.raises(NotSupportedError):
+                async for _ in ws.trade_stream("C:EURUSD"):
+                    pass
+            with pytest.raises(NotSupportedError):
+                async for _ in ws.trade_stream("I:SPX"):
+                    pass
+
+        asyncio.run(go())
+
+
+class TestMassiveFinalTicks:
+    def test_map_trades_list_conditions(self):
+        from datakodo.adapters.massive.mapper import map_trades
+
+        buy = map_trades({"t": 1700000000000, "p": 10.0, "s": 1.0, "c": [2], "i": 1})
+        assert buy.side == "buy"
+        sell = map_trades({"t": 1700000000000, "p": 10.0, "s": 1.0, "c": [1], "i": 2})
+        assert sell.side == "sell"
+        unknown = map_trades({"t": 1700000000000, "p": 10.0, "s": 1.0, "c": [37], "i": 3})
+        assert unknown.side is None
+
+    def test_fetch_ohlcv_forwards_adjust(self, monkeypatch):
+        from datetime import UTC, datetime, timedelta
+
+        adapter = MassiveAdapter(api_key="test-key")
+        now = datetime.now(UTC)
+        seen: dict = {}
+
+        def _fake_aggs(symbol, timeframe, start, end, adjust=True, limit=5000):
+            seen["adjust"] = adjust
+            return [
+                {
+                    "t": int((now - timedelta(hours=2)).timestamp() * 1000),
+                    "o": 1.0,
+                    "h": 2.0,
+                    "l": 0.5,
+                    "c": 1.5,
+                    "v": 100.0,
+                    "vw": 1.2,
+                    "n": 5,
+                }
+            ]
+
+        monkeypatch.setattr(adapter._rest, "aggs", _fake_aggs)
+        adapter.fetch_ohlcv("AAPL", "1h", now - timedelta(hours=3), now, adjust=False)
+        assert seen["adjust"] is False
+
+    def test_search_accepts_massive_spellings(self, monkeypatch):
+        adapter = MassiveAdapter(api_key="test-key")
+        tickers = [
+            {
+                "ticker": "AAPL",
+                "name": "Apple Inc.",
+                "market": "stocks",
+                "type": "stock",
+                "primary_exchange": "NMS",
+                "currency_name": "usd",
+            },
+        ]
+        monkeypatch.setattr(adapter._rest, "list_tickers", lambda *a, **k: tickers)
+        # Canonical enum and Massive string spellings both match EQUITY.
+        assert len(adapter.search_instruments("apple", asset_class=AssetClass.EQUITY)) == 1
+        assert len(adapter.search_instruments("apple", asset_class="stocks")) == 1
+        assert len(adapter.search_instruments("apple", asset_class="indices")) == 0
+
+    def test_search_matches_name(self, monkeypatch):
+        adapter = MassiveAdapter(api_key="test-key")
+        tickers = [
+            {
+                "ticker": "AAPL",
+                "name": "Apple Inc.",
+                "market": "stocks",
+                "type": "stock",
+                "primary_exchange": "NMS",
+                "currency_name": "usd",
+            },
+        ]
+        monkeypatch.setattr(adapter._rest, "list_tickers", lambda *a, **k: tickers)
+        assert len(adapter.search_instruments("apple")) == 1
+        assert len(adapter.search_instruments("AAPL")) == 1
+        assert len(adapter.search_instruments("zzz-no-match")) == 0

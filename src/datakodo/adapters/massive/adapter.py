@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from datakodo.adapters.massive.config import MassiveConfig
-from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv, map_trades
+from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
@@ -26,6 +26,62 @@ _MARKET_BY_PREFIX = {
     "I:": "index",
     "O:": "options",
 }
+
+# Canonical AssetClass -> Massive ``market`` query value (design doc sec 4/5).
+# Accepts both the enum and plain strings so skill-style calls like
+# ``search_instruments("AAPL", asset_class="stocks")`` keep working.
+_ASSET_TO_MARKET = {
+    "equity": "stocks",
+    "crypto": "crypto",
+    "forex": "forex",
+    "index": "indices",
+    "indices": "indices",
+    "etf": "stocks",
+    "metal": "futures",
+    "bond": "stocks",
+}
+
+# Any accepted spelling -> canonical asset name, so "stocks" and EQUITY compare
+# equal in client-side filtering.
+_ASSET_CANONICAL = {
+    "stocks": "equity",
+    "equity": "equity",
+    "crypto": "crypto",
+    "forex": "forex",
+    "fx": "forex",
+    "indices": "index",
+    "index": "index",
+    "etf": "etf",
+    "metal": "metal",
+    "bond": "bond",
+}
+
+# Canonical InstrumentType -> Massive ``type`` query value.
+_TYPE_TO_MASSIVE = {
+    "spot": None,  # no server-side narrowing; filtered client-side
+    "perpetual": None,
+    "future": "future",
+    "option": "option",
+    "cfd": None,
+}
+
+
+def _massive_market_of(asset_class: Any) -> str | None:
+    """Normalize an asset-class filter to a Massive ``market`` value."""
+    if asset_class is None:
+        return None
+    key = str(getattr(asset_class, "value", asset_class)).lower()
+    if key in ("stocks", "indices"):
+        return key  # already a Massive spelling
+    return _ASSET_TO_MARKET.get(key, key or None)
+
+
+def _massive_type_of(instrument_type: Any) -> str | None:
+    """Normalize an instrument-type filter to a Massive ``type`` value."""
+    if instrument_type is None:
+        return None
+    key = str(getattr(instrument_type, "value", instrument_type)).lower()
+    return _TYPE_TO_MASSIVE.get(key, key or None)
 
 
 class MassiveAdapter(AdapterInterface):
@@ -87,13 +143,15 @@ class MassiveAdapter(AdapterInterface):
         fetched fresh on each call (design doc sec 5, per project requirement).
 
         The ``instrument_type`` filter accepts ``InstrumentType`` enum values.
-        The ``asset_class`` filter accepts ``AssetClass`` enum values.
-        The ``quote`` filter matches the quote/currency leg of the symbol.
-        The ``exchange`` filter matches the provider exchange code.
+        The ``asset_class`` filter accepts ``AssetClass`` enum values (plain
+        strings such as ``"stocks"`` work too). The ``quote`` filter matches
+        the quote/currency leg of the symbol. The ``exchange`` filter matches
+        the provider exchange code.
         """
         tickers = self._rest.list_tickers(
-            market=asset_class,
-            type=instrument_type,
+            market=_massive_market_of(asset_class),
+            type=_massive_type_of(instrument_type),
+            exchange=exchange,
             search=query,
             limit=limit,
         )
@@ -110,7 +168,15 @@ class MassiveAdapter(AdapterInterface):
                 )
             except Exception:
                 continue
-            if not self._search_match(inst, query, asset_class, instrument_type, quote, exchange):
+            if not self._search_match(
+                inst,
+                query,
+                asset_class,
+                instrument_type,
+                quote,
+                exchange,
+                name=ticker.get("name", ""),
+            ):
                 continue
             results.append(inst)
             if len(results) >= limit:
@@ -125,18 +191,33 @@ class MassiveAdapter(AdapterInterface):
         instrument_type: Any,
         quote: str | None,
         exchange: str | None,
+        *,
+        name: str = "",
     ) -> bool:
         """Apply one symbol against every optional search filter (design doc sec 5)."""
         if query:
-            names = [inst.symbol]
+            lowered = query.lower()
+            names = [inst.symbol, name or ""]
             if inst.future is not None and inst.future.underlying:
                 names.append(inst.future.underlying)
-            if not any(query.lower() in name.lower() for name in names):
+            if not any(lowered in candidate.lower() for candidate in names if candidate):
                 return False
-        if asset_class is not None and inst.asset_class != asset_class:
-            return False
-        if instrument_type is not None and inst.instrument_type != instrument_type:
-            return False
+        if asset_class is not None:
+            wanted = _ASSET_CANONICAL.get(
+                str(getattr(asset_class, "value", asset_class)).lower(),
+                str(getattr(asset_class, "value", asset_class)).lower(),
+            )
+            got = _ASSET_CANONICAL.get(
+                str(getattr(inst.asset_class, "value", inst.asset_class)).lower(),
+                str(getattr(inst.asset_class, "value", inst.asset_class)).lower(),
+            )
+            if wanted != got:
+                return False
+        if instrument_type is not None:
+            wanted_t = str(getattr(instrument_type, "value", instrument_type)).lower()
+            got_t = str(getattr(inst.instrument_type, "value", inst.instrument_type)).lower()
+            if wanted_t != got_t:
+                return False
         if quote is not None and inst.currency.lower() != quote.lower():
             return False
         if exchange is not None and inst.exchange.lower() != exchange.lower():
@@ -230,6 +311,7 @@ class MassiveAdapter(AdapterInterface):
         columns: str | list[str] = "basic",
         include_live: bool = False,
         output_format: str | None = None,
+        adjust: bool = True,
         **kwargs,
     ) -> Any:
         """Fetch OHLCV candles for a date range (design doc sec 3, 18).
@@ -243,14 +325,15 @@ class MassiveAdapter(AdapterInterface):
         By default only fully closed bars are returned (design doc sec 18);
         set ``include_live=True`` to keep the still-forming bar, marked
         ``is_closed=False``. ``output_format`` overrides ``Config.output_format``
-        (pandas by default).
+        (pandas by default). ``adjust`` selects split/dividend-adjusted vs raw
+        equity prices where the provider supports it (design doc sec 18).
         """
         from datakodo.core.timeframe import resolve_date_range
 
         start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market = self._market_of(symbol)
-        raw = self._rest.aggs(symbol, timeframe, start, end)
+        raw = self._rest.aggs(symbol, timeframe, start, end, adjust=adjust)
         df = map_ohlcv(raw, timeframe, market=market, columns=columns)
 
         if not include_live:
@@ -294,6 +377,7 @@ class MassiveAdapter(AdapterInterface):
     # -- streaming (async) --
 
     async def stream_trades(self, symbol: str | Instrument):
+        """Yield canonical ``Trade`` records (mapped once, in ``ws``)."""
         symbol = symbol_of(symbol)
-        async for raw in self._ws.trade_stream(symbol):
-            yield map_trades(raw)
+        async for trade in self._ws.trade_stream(symbol):
+            yield trade

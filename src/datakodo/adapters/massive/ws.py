@@ -16,7 +16,12 @@ from typing import Any
 
 from massive.websocket import AuthError, WebSocketClient
 
-from datakodo.core.exceptions import AuthenticationError, ConnectionError, DataLibError
+from datakodo.core.exceptions import (
+    AuthenticationError,
+    ConnectionError,
+    DataLibError,
+    NotSupportedError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,17 @@ _MARKET_BY_PREFIX = {
     "C:": "forex",
     "I:": "indices",
     "O:": "options",
+}
+
+# Market -> WS trade channel (Massive docs: stocks ``T``, crypto ``XT``,
+# options/futures ``T``). Forex exposes quotes (``C``) and aggregates, not a
+# trades feed; indices expose values/aggregates, not trades — streaming ticks
+# there would fake support (design doc sec 2), so they raise honestly.
+_TRADE_CHANNEL_BY_MARKET = {
+    "stocks": "T",
+    "options": "T",
+    "crypto": "XT",
+    "futures": "T",
 }
 
 # Seconds without a frame before the stream health-checks the connection.
@@ -59,6 +75,24 @@ class MassiveWS:
                 return market
         return "stocks"
 
+    @staticmethod
+    def _trade_channel_for(symbol: str) -> str:
+        """Return the WS trade channel for ``symbol`` (``T`` vs ``XT``).
+
+        Raises:
+            NotSupportedError: Forex has only quotes/aggregates and indices
+                only values/aggregates on the WS API — no trades feed exists,
+                so streaming ticks there would fake support (design doc sec 2).
+        """
+        market = MassiveWS._market_for(symbol)
+        channel = _TRADE_CHANNEL_BY_MARKET.get(market)
+        if channel is None:
+            raise NotSupportedError(
+                f"Massive has no WS trades feed for {market!r} (symbol {symbol!r}); "
+                "forex streams quotes (C) and indices stream values, not trades."
+            )
+        return channel
+
     async def connect(self, market: str = "stocks") -> None:
         """Connect to the Massive feed for ``market`` (design doc sec 23).
 
@@ -67,6 +101,10 @@ class MassiveWS:
         """
         await self.disconnect()
         self._market = market
+        # Fresh connection, fresh queue: frames queued by a previous symbol
+        # must never leak into the next stream.
+        while not self._queue.empty():
+            self._queue.get_nowait()
         self._client = WebSocketClient(
             api_key=self._api_key or None,
             market=market,
@@ -135,17 +173,23 @@ class MassiveWS:
         """Yield canonical ``Trade`` records for ``symbol`` (trades channel).
 
         Connects (or reconnects) to the symbol's market automatically, then
-        subscribes ``T``. Status/metadata frames are skipped; unmappable
-        frames are logged and skipped; the ``T`` subscription is released on
-        exit. A dead connection surfaces as ``ConnectionError``, never
-        silence (design doc sec 2).
+        subscribes the market's trade channel (``T`` for stocks/options,
+        ``XT`` for crypto). Status/metadata frames are skipped; unmappable
+        frames are logged and skipped; the subscription is released on exit.
+        A dead connection surfaces as ``ConnectionError``, never silence
+        (design doc sec 2).
+
+        Note: only markets with a trades feed produce frames (stocks,
+        options, crypto, futures). Forex (quotes only) and indices (values
+        only) raise ``NotSupportedError`` instead of idling forever.
         """
         from datakodo.adapters.massive.mapper import map_trades
 
+        channel = self._trade_channel_for(symbol)
         market = self._market_for(symbol)
         if not self.connected or self._market != market:
             await self.connect(market)
-        await self.subscribe("T", symbol)
+        await self.subscribe(channel, symbol)
         logger.info("Starting Massive trade stream for %s", symbol)
         closed_by_user = False
         try:
@@ -168,7 +212,7 @@ class MassiveWS:
         finally:
             try:
                 if self.connected:
-                    await self.unsubscribe("T", symbol)
+                    await self.unsubscribe(channel, symbol)
             except ConnectionError:
                 pass
             logger.info("Stopped Massive trade stream for %s", symbol)

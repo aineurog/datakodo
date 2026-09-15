@@ -292,15 +292,33 @@ def map_trades(raw: dict[str, Any]) -> Trade:
     timestamp = raw.get("t") or raw.get("sip_timestamp") or raw.get("timestamp")
     conditions = raw.get("c")
 
+    # Crypto encodes the aggressor side numerically: 1 = sell, 2 = buy.
+    # The wire shape is a list (e.g. ``"c": [2]``); some transports flatten it
+    # to a bare int, so accept both.
     if isinstance(conditions, int):
         side = _CRYPTO_SIDE.get(conditions)
+    elif isinstance(conditions, (list, tuple)):
+        side = None
+        for code in conditions:
+            if code in _CRYPTO_SIDE:
+                side = _CRYPTO_SIDE[code]
+                if code == 2:
+                    break
     else:
         side = None
+
+    # Trade ids may be non-numeric strings (crypto venues); never let one
+    # kill the caller — fall back to None like map_rest_trades does.
+    raw_id = raw.get("i")
+    try:
+        trade_id = int(raw_id) if raw_id is not None else None
+    except (TypeError, ValueError):
+        trade_id = None
 
     return Trade(
         timestamp=pd.Timestamp(_to_ms(timestamp or 0), unit="ms", tz="UTC"),
         price=float(raw["p"]),
         size=float(raw.get("s") or 0.0),
         side=side,
-        trade_id=raw.get("i"),
+        trade_id=trade_id,
     )
