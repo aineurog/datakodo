@@ -5,7 +5,7 @@ This page covers the **MetaTrader 5** adapter, which reads from a local MT5
 terminal. The Binance adapter (spot / USD-M futures) is documented separately
 in [docs/binance.md](binance.md).
 
-Other providers (Alpaca, Polygon, IBKR, ...) will get their own pages
+Other providers (Alpaca, Massive, IBKR, ...) will get their own pages
 following the same structure.
 
 ## Data Precision
@@ -198,7 +198,7 @@ with Client("mt5") as client:
 ```
 
 How it runs (design doc sec 11): adapters declare a `concurrency_model`, and
-batch concurrency is gated on it. Thread-safe adapters (Binance, Polygon,
+batch concurrency is gated on it. Thread-safe adapters (Binance, Massive,
 Alpaca) fan out over a `ThreadPoolExecutor`; **MT5 is `"serial"`** — the MT5
 Python API is a COM-style bridge with a single connection to one terminal, and
 concurrent calls through it are not safe. So for MT5 the batch is a plain

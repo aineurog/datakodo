@@ -23,7 +23,7 @@ jobs:
 
       - name: Install package with test deps
         run: |
-          pip install -e ".[binance,alpaca,polygon,ibkr,dev]"
+          pip install -e ".[binance,alpaca,massive,ibkr,dev]"
 
       - name: Lint with ruff
         run: ruff check src/ tests/

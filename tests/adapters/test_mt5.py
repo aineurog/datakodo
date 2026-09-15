@@ -126,6 +126,13 @@ class FakeMT5Module:
         self.step = 60  # seconds between fabricated bars
         self.no_history = False  # when True, copy_rates_range returns None
         self.symbol_select_ok = True
+        # Optional terminal history window (epoch seconds). When set,
+        # copy_rates_range only serves the intersection, simulating a
+        # terminal that holds part of the requested range.
+        self.serve_from: int | None = None
+        self.serve_to: int | None = None
+        # Transient empties before serving (background-download simulation).
+        self.empty_calls_left: int = 0
 
     def initialize(self, *args, **kwargs) -> bool:
         self.init_args = args
@@ -155,9 +162,38 @@ class FakeMT5Module:
         self.calls.append((symbol, timeframe, start, end))
         if end <= start or self.no_history:
             return None
-        times = range(int(start.timestamp()), int(end.timestamp()), self.step)
+        if self.empty_calls_left > 0:
+            self.empty_calls_left -= 1
+            return None
+        lo, hi = int(start.timestamp()), int(end.timestamp())
+        if self.serve_from is not None or self.serve_to is not None:
+            lo = max(lo, self.serve_from if self.serve_from is not None else 0)
+            hi = min(hi, self.serve_to if self.serve_to is not None else 2**33)
+            if hi <= lo:
+                return None
+        times = range(lo, hi, self.step)
         rows = np.array(
             [(t, 1.10, 1.11, 1.09, 1.105, 100 + t % 7, 5, 0) for t in times],
+            dtype=_RAW_DTYPE,
+        )
+        return rows
+
+    def copy_rates_from_pos(self, symbol, timeframe, start_pos, count):
+        if self.no_history:
+            return None
+        newest = self.serve_to if self.serve_to is not None else int(time.time())
+        rows = np.array(
+            [(newest - 60, 1.10, 1.11, 1.09, 1.105, 100, 5, 0)],
+            dtype=_RAW_DTYPE,
+        )
+        return rows
+
+    def copy_rates_from(self, symbol, timeframe, date_from, count):
+        if self.no_history:
+            return None
+        oldest = self.serve_from if self.serve_from is not None else 1577836800
+        rows = np.array(
+            [(oldest, 1.10, 1.11, 1.09, 1.105, 100, 5, 0)],
             dtype=_RAW_DTYPE,
         )
         return rows
@@ -831,11 +867,11 @@ class TestMapFundamentals:
             map_fundamentals("EURUSD", None)
 
 
-def _mark_last_bar_open(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+def _mark_last_bar_open(df: pd.DataFrame, timeframe: str, **kwargs) -> pd.DataFrame:
     """Wrap ``add_is_closed`` but force the last bar to be still forming."""
     from datakodo.ops.validation import add_is_closed
 
-    out = add_is_closed(df, timeframe)
+    out = add_is_closed(df, timeframe, **kwargs)
     out.iloc[-1, out.columns.get_loc("is_closed")] = False
     return out
 
@@ -1076,6 +1112,81 @@ class TestMT5Adapter:
         df = self._fetch(fake_mt5, columns="basic", include_live=True)
         assert len(df) == 2880
         assert not df["is_closed"].iloc[-1]
+
+    def test_fetch_ohlcv_retries_empty_window_then_succeeds(self, fake_mt5, monkeypatch, caplog):
+        """Transient empty windows are retried: background downloads fill in."""
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
+        fake_mt5.step = 3600  # one bar per hour
+        fake_mt5.empty_calls_left = 2
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with caplog.at_level(logging.INFO):
+            df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(hours=3))
+        assert len(df) == 3
+        assert any("retrying" in r.message for r in caplog.records)
+
+    def test_fetch_ohlcv_partial_overlap_returns_available(self, fake_mt5, monkeypatch, caplog):
+        """A request wider than terminal history returns the overlap (partial)."""
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
+        fake_mt5.step = 3600  # one bar per hour
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        end = start + timedelta(hours=6)
+        fake_mt5.serve_from = int((start + timedelta(hours=2)).timestamp())
+        fake_mt5.serve_to = int((start + timedelta(hours=4)).timestamp())
+        fake_mt5.empty_calls_left = 4  # exhaust the first full pass
+        adapter = self._connected_adapter(fake_mt5)
+        with caplog.at_level(logging.INFO):
+            df = adapter.fetch_ohlcv("EURUSD", "1h", start, end)
+        assert len(df) == 2
+        assert df["timestamp"].min() >= start + timedelta(hours=2)
+        assert df["timestamp"].max() < end
+        assert any("partial" in r.message for r in caplog.records)
+
+    def test_fetch_ohlcv_no_overlap_reports_terminal_range(self, fake_mt5, monkeypatch):
+        """Zero overlap raises with requested and terminal ranges in the message."""
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
+        fake_mt5.serve_from = int(datetime(2025, 1, 1, tzinfo=UTC).timestamp())
+        fake_mt5.serve_to = int(datetime(2025, 1, 2, tzinfo=UTC).timestamp())
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(DataNotAvailableError, match="Terminal holds"):
+            adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(hours=3))
+
+    def test_fetch_ohlcv_probe_failure_raises_without_terminal_range(self, fake_mt5, monkeypatch):
+        """A failed history probe still raises, minus the terminal-range line."""
+        monkeypatch.setattr("datakodo.adapters.mt5.rest.time.sleep", lambda s: None)
+        fake_mt5.no_history = True
+        adapter = self._connected_adapter(fake_mt5)
+        monkeypatch.setattr(adapter._rest, "available_range", lambda *a, **k: None)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        with pytest.raises(DataNotAvailableError) as exc_info:
+            adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(hours=3))
+        assert "Terminal holds" not in str(exc_info.value)
+
+    def test_server_now_uses_tick_not_wall_clock(self, fake_mt5):
+        """server_now derives UTC from the tick, independent of the PC clock."""
+        rest = _connected_rest(fake_mt5)
+        fake_mt5.tick = SimpleNamespace(time=1_700_000_000)
+        assert rest.server_now("EURUSD", offset_seconds=0) == datetime(
+            2023, 11, 14, 22, 13, 20, tzinfo=UTC
+        )
+
+    def test_add_is_closed_honours_explicit_now(self):
+        """An explicit now lets callers use a server clock instead of the PC clock."""
+        from datakodo.ops.validation import add_is_closed
+
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(["2026-01-01 00:00", "2026-01-01 01:00"]).tz_localize(
+                    "UTC"
+                ),
+                "open": [1.0, 1.0],
+            }
+        )
+        past = add_is_closed(df, "1h", now=datetime(2026, 1, 2, tzinfo=UTC))
+        assert past["is_closed"].all()
+        future = add_is_closed(df, "1h", now=datetime(2025, 1, 1, tzinfo=UTC))
+        assert not future["is_closed"].any()
 
     def test_fetch_ohlcv_output_format_polars(self, fake_mt5):
         out = self._fetch(fake_mt5, columns="basic", output_format="polars")

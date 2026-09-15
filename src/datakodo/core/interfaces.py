@@ -70,17 +70,20 @@ class AdapterInterface(ABC):
         self,
         symbol: str | Instrument,
         timeframe: str,
-        start: Any,
-        end: Any,
+        start: Any = None,
+        end: Any = None,
         *,
         columns: str | Sequence[str] = "basic",
         **kwargs: Any,
     ) -> Any:
         """Fetch OHLCV candles for a date range. Always sync/blocking.
 
-        ``columns`` selects the schema: ``"basic"`` (default) returns the
-        invariant minimum columns; ``"all"`` returns everything the provider
-        offers; a list requests specific optional columns (design doc sec 9).
+        ``start``/``end`` default to the last 30 days (``end`` = now UTC)
+        via :func:`datakodo.core.timeframe.resolve_date_range`, so callers
+        may omit both. ``columns`` selects the schema: ``"basic"`` (default)
+        returns the invariant minimum columns; ``"all"`` returns everything
+        the provider offers; a list requests specific optional columns
+        (design doc sec 9).
         """
 
     def _default_output_format(self) -> str:
@@ -92,8 +95,8 @@ class AdapterInterface(ABC):
         self,
         symbols: Sequence[str | Instrument],
         timeframe: str,
-        start: Any,
-        end: Any,
+        start: Any = None,
+        end: Any = None,
         *,
         combine: bool = False,
         output_format: str | None = None,
@@ -129,6 +132,9 @@ class AdapterInterface(ABC):
         """
         if not symbols:
             raise ValueError("At least one symbol is required.")
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         fmt = output_format or self._default_output_format()
         per_call = {"columns": columns, "output_format": "pandas", **kwargs}
 
