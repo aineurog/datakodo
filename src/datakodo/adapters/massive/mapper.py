@@ -186,7 +186,9 @@ def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = Non
     - ``futures``      -> ``asset_class=EQUITY``, ``instrument_type=FUTURE``
     """
     raw_ticker = (ticker.get("ticker") or "").upper()
-    massive_market = (ticker.get("market") or "").lower()
+    # Fall back to the adapter's symbol-prefix hint when the ticker dict
+    # carries no ``market`` field (e.g. minimal/legacy payloads).
+    massive_market = (ticker.get("market") or market or "").lower()
     massive_type = (ticker.get("type") or "").lower()
     exchange = ticker.get("primary_exchange") or ""
     currency_name = (ticker.get("currency_name") or "").upper()

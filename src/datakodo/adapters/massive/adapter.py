@@ -297,7 +297,7 @@ class MassiveAdapter(AdapterInterface):
         value = int(ts)
         if abs(value) > 10**15:
             value = value // 1_000_000  # ns -> ms
-        return _dt.datetime.fromtimestamp(value, tz=_dt.UTC)
+        return _dt.datetime.fromtimestamp(value / 1_000, tz=_dt.UTC)
 
     # -- historical (sync) --
 
