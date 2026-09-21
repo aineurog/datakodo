@@ -47,6 +47,7 @@ dependencies = [
 ]
 
 [project.entry-points."datakodo.adapters"]
+alpaca = "datakodo.adapters.alpaca:AlpacaAdapter"
 binance = "datakodo.adapters.binance:BinanceAdapter"
 mt5 = "datakodo.adapters.mt5:MT5Adapter"
 massive = "datakodo.adapters.massive:MassiveAdapter"

@@ -627,7 +627,7 @@ def test_client_unknown_provider_raises():
     from datakodo import Client
 
     with pytest.raises(ValueError, match="Unknown provider"):
-        Client("alpaca")  # not registered yet
+        Client("definitely_not_a_provider")  # must stay unregistered
 
 
 # --- 5b. Resampling ---------------------------------------------------------------
