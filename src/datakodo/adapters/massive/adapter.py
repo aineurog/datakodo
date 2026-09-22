@@ -9,12 +9,13 @@ from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import DataNotAvailableError, SymbolNotFoundError
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import Fundamentals
+from datakodo.core.schemas import Fundamentals, available_ohlcv_extras, resolve_ohlcv_columns
 from datakodo.ops.output import to_output_format
+from datakodo.ops.resample import pick_source_timeframe, resample
 from datakodo.ops.validation import validate_ohlcv
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ class MassiveAdapter(AdapterInterface):
     supports_streaming_orderbook = False
     supports_streaming_ticks = True
     supports_fundamentals = True
+
+    native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
 
     def __init__(
         self,
@@ -327,14 +330,64 @@ class MassiveAdapter(AdapterInterface):
         ``is_closed=False``. ``output_format`` overrides ``Config.output_format``
         (pandas by default). ``adjust`` selects split/dividend-adjusted vs raw
         equity prices where the provider supports it (design doc sec 18).
+
+        If ``timeframe`` is not natively available it is derived by fetching
+        the nearest smaller native timeframe and resampling up (design doc
+        sec 8), flagged via ``Config.flag_resample``. Resampled output is
+        always fully closed.
         """
         from datakodo.core.timeframe import resolve_date_range
 
         start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market = self._market_of(symbol)
+        try:
+            tf = Timeframe(timeframe)
+        except ValueError:
+            tf = None  # unknown: native path raises InvalidTimeframeError as before
+
+        if tf is None or tf in self.native_timeframes:
+            df = self._fetch_ohlcv_native(
+                symbol, timeframe, market, start, end, adjust, include_live
+            )
+        else:
+            source_tf = pick_source_timeframe(tf, self.native_timeframes)
+            self._log_resample(timeframe, source_tf.value)
+            source = self._fetch_ohlcv_native(
+                symbol, source_tf.value, market, start, end, adjust, include_live=False
+            )
+            df = resample(source, tf)
+            validate_ohlcv(df)
+            logger.info(
+                "Resampled %s -> %s (%d bars) for %s",
+                source_tf.value,
+                timeframe,
+                len(df),
+                symbol,
+            )
+
+        available = available_ohlcv_extras(df.columns)
+        resolved = resolve_ohlcv_columns(columns, available)
+        return to_output_format(df[resolved], output_format or self._config.output_format)
+
+    def _fetch_ohlcv_native(
+        self,
+        symbol: str,
+        timeframe: str,
+        market: str,
+        start: datetime,
+        end: datetime,
+        adjust: bool,
+        include_live: bool,
+    ) -> Any:
+        """Fetch ``timeframe`` candles the provider offers natively.
+
+        Shared by ``fetch_ohlcv`` for the direct path and as the source when
+        resampling. Returns the validated full frame (base + extras);
+        ``include_live`` keeps the still-forming bar, otherwise closed only.
+        """
         raw = self._rest.aggs(symbol, timeframe, start, end, adjust=adjust)
-        df = map_ohlcv(raw, timeframe, market=market, columns=columns)
+        df = map_ohlcv(raw, timeframe, market=market, columns="all")
 
         if not include_live:
             df = df.loc[df["is_closed"]].reset_index(drop=True)
@@ -347,7 +400,19 @@ class MassiveAdapter(AdapterInterface):
 
         validate_ohlcv(df)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
-        return to_output_format(df, output_format or self._config.output_format)
+        return df
+
+    def _log_resample(self, requested: str, source: str) -> None:
+        """Warn (or log quietly) that ``requested`` is derived by resampling."""
+        if self._config.flag_resample:
+            logger.warning(
+                "%s has no native %s bars; fetching %s and resampling",
+                self.__class__.__name__,
+                requested,
+                source,
+            )
+        else:
+            logger.info("Deriving %s from %s by resampling", requested, source)
 
     def fetch_ticks(
         self,

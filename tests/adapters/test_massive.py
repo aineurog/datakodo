@@ -7,7 +7,7 @@ import pytest
 
 from datakodo.adapters.massive.adapter import MassiveAdapter
 from datakodo.adapters.massive.mapper import map_instrument
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import AuthenticationError
 from datakodo.core.exceptions import ConnectionError as DataConnectionError
 from datakodo.core.instruments import Instrument
@@ -2279,3 +2279,55 @@ class TestWSLastMile:
             assert not ws.connected
 
         asyncio.run(go())
+
+
+def _hour_row(t_ms, o, h, low, c, v):
+    return {"t": t_ms, "o": o, "h": h, "l": low, "c": c, "v": v, "vw": c, "n": 10, "otc": None}
+
+
+class _RestrictedMassive(MassiveAdapter):
+    """Massive adapter pretending to offer only 1m and 1h natively."""
+
+    native_timeframes = (Timeframe.M1, Timeframe.H1)
+
+
+def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
+    """4h requested, only 1h native -> fetch 1h aggs and resample to one 4h bar."""
+    adapter = _RestrictedMassive(api_key="test-key")
+    raw = [
+        _hour_row(1704067200000, 100.0, 110.0, 90.0, 105.0, 1000.0),  # 00:00
+        _hour_row(1704070800000, 105.0, 120.0, 100.0, 115.0, 2000.0),  # 01:00
+        _hour_row(1704074400000, 115.0, 130.0, 110.0, 125.0, 3000.0),  # 02:00
+        _hour_row(1704078000000, 125.0, 140.0, 120.0, 135.0, 4000.0),  # 03:00
+    ]
+    monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: raw)
+
+    df = adapter.fetch_ohlcv(
+        "AAPL",
+        "4h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    assert len(df) == 1
+    assert df.loc[0, "open"] == 100.0
+    assert df.loc[0, "high"] == 140.0
+    assert df.loc[0, "low"] == 90.0
+    assert df.loc[0, "close"] == 135.0
+    assert df.loc[0, "volume"] == 10000.0
+    assert df.loc[0, "is_closed"]
+
+
+def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
+    """A natively offered timeframe is fetched directly, no resampling."""
+    adapter = _RestrictedMassive(api_key="test-key")
+    captured = {}
+
+    def _fake_aggs(symbol, timeframe, start, end, adjust=True):
+        captured["timeframe"] = timeframe
+        return [_hour_row(1704067200000, 100.0, 110.0, 90.0, 105.0, 1000.0)]
+
+    monkeypatch.setattr(adapter._rest, "aggs", _fake_aggs)
+    adapter.fetch_ohlcv(
+        "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+    )
+    assert captured["timeframe"] == "1h"
