@@ -6,6 +6,7 @@ token-bucket gate, backoff retries, and status mapping apply uniformly.
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 from alpaca.common.exceptions import APIError
@@ -14,6 +15,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.trading.client import TradingClient
 from requests.exceptions import RequestException
 from requests.exceptions import Timeout as RequestsTimeout
 
@@ -36,6 +38,12 @@ from datakodo.core.timeframe import ALPACA_MAP
 from datakodo.ratelimit.limiter import TokenBucket
 
 logger = logging.getLogger(__name__)
+
+_CLIENTS: dict[str, Any] = {
+    "stock": StockHistoricalDataClient,
+    "crypto": CryptoHistoricalDataClient,
+    "assets": TradingClient,
+}
 
 
 def alpaca_resolution(timeframe: Timeframe | str) -> TimeFrame:
@@ -66,7 +74,7 @@ class AlpacaREST:
             rate=self._alpaca.rate_limit_rate,
             burst=self._alpaca.rate_limit_burst,
         )
-        self._clients: dict = {}
+        self._clients: dict[str, Any] = {}
 
     def _ensure_client(self, kind: str = "stock"):
         """Build the SDK client on first use (lazy: SDK rejects empty keys)."""
@@ -76,15 +84,14 @@ class AlpacaREST:
                     "Alpaca credentials are missing. Pass api_key/api_secret "
                     "explicitly or set APCA_API_KEY_ID / APCA_API_SECRET_KEY."
                 )
-            kwargs: dict[str, Any] = {
-                "api_key": self._alpaca.api_key,
-                "secret_key": self._alpaca.api_secret,
-                "url_override": self._alpaca.data_base_url,
-            }
-            if kind == "crypto":
-                self._clients[kind] = CryptoHistoricalDataClient(**kwargs)
-            else:
-                self._clients[kind] = StockHistoricalDataClient(**kwargs)
+            extra: dict[str, Any] = (
+                {"paper": True}  # assets catalog is identical on both hosts
+                if kind == "assets"
+                else {"url_override": self._alpaca.data_base_url}
+            )
+            self._clients[kind] = _CLIENTS[kind](
+                api_key=self._alpaca.api_key, secret_key=self._alpaca.api_secret, **extra
+            )
         return self._clients[kind]
 
     def _translate(self, exc: APIError) -> DataLibError:
@@ -100,7 +107,8 @@ class AlpacaREST:
             return DataValidationError(f"Alpaca rejected the request (HTTP {status}).{suffix}")
         if status == 401:
             return AuthenticationError(
-                "Alpaca authentication failed. Check APCA_API_KEY_ID / APCA_API_SECRET_KEY."
+                "Alpaca authentication failed. Check APCA_API_KEY_ID / APCA_API_SECRET_KEY "
+                "(paper keys — reference reads use the paper host)."
             )
         if status == 403:
             return PaidTierRequiredError(
@@ -199,8 +207,8 @@ class AlpacaREST:
         self,
         symbol: str,
         timeframe: str,
-        start,
-        end,
+        start: datetime,
+        end: datetime,
         *,
         feed: str | None = None,
         adjustment: str = "raw",
@@ -231,3 +239,7 @@ class AlpacaREST:
             return list(result[symbol])
         except KeyError:
             return []
+
+    def list_assets(self) -> list:
+        """Fetch the assets master list (fresh per call, no caching)."""
+        return list(self._call("get_all_assets", client="assets"))
