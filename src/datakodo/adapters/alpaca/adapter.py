@@ -53,7 +53,7 @@ class AlpacaAdapter(AdapterInterface):
             overrides["api_secret"] = api_secret
         if overrides:
             self._alpaca = self._alpaca.model_copy(update=overrides)
-        self._rest = AlpacaREST(self._alpaca.api_key, self._alpaca.api_secret)
+        self._rest = AlpacaREST(alpaca_config=self._alpaca, config=self._config)
         self._ws = AlpacaWS(self._alpaca.api_key, self._alpaca.api_secret)
 
     # -- historical (sync): endpoint logic lands in steps 4–8 --

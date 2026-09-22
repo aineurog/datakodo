@@ -53,9 +53,6 @@ class AlpacaConfig(BaseSettings):
     """Default market-data feed. ``iex`` is the only feed available without a
     paid subscription; ``sip`` requires a paid data plan."""
 
-    timeout: float = 10.0
-    """Per-request connect/read timeout in seconds for Alpaca REST."""
-
     rate_limit_rate: float = 3.0
     """Alpaca token-bucket refill rate (tokens/sec).
 
