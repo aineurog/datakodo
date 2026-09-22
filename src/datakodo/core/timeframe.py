@@ -62,6 +62,20 @@ MASSIVE_MAP: dict[Timeframe, tuple[int, str]] = {
     Timeframe.MN1: (1, "month"),
 }
 
+# Canonical -> Alpaca (amount, TimeFrameUnit name). Plain tuples so core
+# never imports a provider SDK; rest.py builds the TimeFrame from these.
+ALPACA_MAP: dict[Timeframe, tuple[int, str]] = {
+    Timeframe.M1: (1, "Minute"),
+    Timeframe.M5: (5, "Minute"),
+    Timeframe.M15: (15, "Minute"),
+    Timeframe.M30: (30, "Minute"),
+    Timeframe.H1: (1, "Hour"),
+    Timeframe.H4: (4, "Hour"),
+    Timeframe.D1: (1, "Day"),
+    Timeframe.W1: (1, "Week"),
+    Timeframe.MN1: (1, "Month"),
+}
+
 # Duration of one candle of each canonical timeframe. Months are approximated
 # as 30 days (a documented, deterministic choice used for pagination sizing).
 _TIMEFRAME_DELTA: dict[Timeframe, timedelta] = {

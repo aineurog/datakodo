@@ -1,13 +1,7 @@
-"""Alpaca REST transport — official SDK plus DataKodo gating and mapping.
+"""Alpaca REST transport: official SDK plus DataKodo gating and error mapping.
 
-The ``alpaca-py`` ``StockHistoricalDataClient`` owns URL construction,
-pagination, and wire parsing. DataKodo adds what it hides: a token-bucket
-gate (design doc sec 17), DataKodo-configured backoff retries (sec 16), and
-mapping of SDK errors onto the DataKodo exception hierarchy.
-
-``_call`` is the single choke point every endpoint flows through (steps 4+),
-so gating, retry, and error mapping apply uniformly. No endpoint logic lives
-here — only transport.
+``_call`` is the single choke point every endpoint flows through, so the
+token-bucket gate, backoff retries, and status mapping apply uniformly.
 """
 
 import logging
@@ -16,11 +10,13 @@ from typing import Any
 
 from alpaca.common.exceptions import APIError
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from requests.exceptions import RequestException
 from requests.exceptions import Timeout as RequestsTimeout
 
 from datakodo.adapters.alpaca.config import AlpacaConfig
 from datakodo.core.config import Config
+from datakodo.core.enums import Timeframe
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
@@ -33,18 +29,28 @@ from datakodo.core.exceptions import (
     SymbolNotFoundError,
     TimeoutError,
 )
+from datakodo.core.timeframe import ALPACA_MAP
 from datakodo.ratelimit.limiter import TokenBucket
 
 logger = logging.getLogger(__name__)
 
 
-class AlpacaREST:
-    """Official-SDK transport with DataKodo gating, retry, and error mapping.
+def alpaca_resolution(timeframe: Timeframe | str) -> TimeFrame:
+    """Return the Alpaca ``TimeFrame`` for a canonical ``timeframe``."""
+    if isinstance(timeframe, str):
+        try:
+            timeframe = Timeframe(timeframe)
+        except ValueError as exc:
+            raise ValueError(f"Unknown timeframe: {timeframe}") from exc
+    resolution = ALPACA_MAP.get(timeframe)
+    if resolution is None:
+        raise ValueError(f"Unknown timeframe: {timeframe}")
+    amount, unit = resolution
+    return TimeFrame(amount, TimeFrameUnit[unit])
 
-    The SDK client is built lazily because the SDK rejects empty keys at
-    construction; missing keys therefore fail only when a call actually
-    needs them, as ``AuthenticationError`` (design doc sec 15).
-    """
+
+class AlpacaREST:
+    """Official-SDK transport with DataKodo gating, retry, and error mapping."""
 
     def __init__(
         self,
@@ -60,7 +66,7 @@ class AlpacaREST:
         self._client: StockHistoricalDataClient | None = None
 
     def _ensure_client(self) -> StockHistoricalDataClient:
-        """Build the SDK client on first use (seam for offline tests)."""
+        """Build the SDK client on first use (lazy: SDK rejects empty keys)."""
         if self._client is None:
             if not (self._alpaca.api_key and self._alpaca.api_secret):
                 raise AuthenticationError(
@@ -74,33 +80,17 @@ class AlpacaREST:
             )
         return self._client
 
-    @staticmethod
-    def _retry_after(exc: APIError) -> float:
-        """Read ``Retry-After`` from an SDK error response, else 0."""
-        headers = getattr(getattr(exc, "response", None), "headers", None) or {}
-        try:
-            return float(headers.get("Retry-After", 0.0))
-        except (TypeError, ValueError):
-            return 0.0
-
-    @staticmethod
-    def _detail(exc: APIError) -> str:
-        """Best-effort server message without ever leaking credentials."""
-        try:
-            return str(exc.message)
-        except (ValueError, KeyError, TypeError):
-            return str(exc)
-
     def _translate(self, exc: APIError) -> DataLibError:
-        """Map an SDK error onto the DataKodo hierarchy (design doc sec 16)."""
+        """Map an SDK error onto the DataKodo hierarchy."""
         status = exc.status_code
-        detail = self._detail(exc)
+        try:
+            detail = str(exc.message)
+        except (ValueError, KeyError, TypeError):
+            detail = str(exc)
         suffix = f" Server says: {detail}" if detail else ""
 
         if status in (400, 422):
-            return DataValidationError(
-                f"Alpaca rejected the request (HTTP {status}).{suffix}"
-            )
+            return DataValidationError(f"Alpaca rejected the request (HTTP {status}).{suffix}")
         if status == 401:
             return AuthenticationError(
                 "Alpaca authentication failed. Check APCA_API_KEY_ID / APCA_API_SECRET_KEY."
@@ -113,7 +103,11 @@ class AlpacaREST:
         if status == 404:
             return SymbolNotFoundError("Alpaca symbol not found (HTTP 404).")
         if status == 429:
-            retry_after = self._retry_after(exc)
+            headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+            try:
+                retry_after = float(headers.get("Retry-After", 0.0))
+            except (TypeError, ValueError):
+                retry_after = 0.0
             return RateLimitError(
                 f"Alpaca rate limit exceeded (HTTP 429). Retry after {retry_after:.0f}s.",
                 retry_after=retry_after,
@@ -169,8 +163,7 @@ class AlpacaREST:
                     ) from translated
                 raise translated
             except RequestsTimeout as exc:
-                # Timeouts stay distinct from connection failures: different
-                # retry semantics (design doc sec 16).
+                # Timeout vs connection failure: different retry semantics.
                 if attempt < max_retries:
                     delay = base_delay * (2**attempt)
                     logger.info(
