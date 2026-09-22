@@ -9,6 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 from alpaca.common.exceptions import APIError
+from alpaca.data import Bar
+from alpaca.data.enums import Adjustment, DataFeed
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout as RequestsTimeout
 
@@ -20,7 +23,9 @@ from datakodo.core.enums import Timeframe
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
+    DataNotAvailableError,
     DataValidationError,
+    InvalidTimeframeError,
     NotSupportedError,
     PaidTierRequiredError,
     RetriesExhaustedError,
@@ -115,12 +120,6 @@ class TestAlpacaSkeleton:
 
 
 class TestAlpacaNotYetImplemented:
-    def test_fetch_ohlcv_raises_not_supported(self):
-        adapter = AlpacaAdapter(api_key="k", api_secret="s")
-        now = datetime.now(UTC)
-        with pytest.raises(NotSupportedError):
-            adapter.fetch_ohlcv("AAPL", "1h", now, now)
-
     def test_unsupported_surfaces_raise_not_supported(self):
         adapter = AlpacaAdapter(api_key="k", api_secret="s")
         with pytest.raises(NotSupportedError):
@@ -189,7 +188,7 @@ def _rest_with_fake(monkeypatch, script, **kwargs):
     kwargs.setdefault("alpaca_config", AlpacaConfig(api_key="k", api_secret="s"))
     rest = AlpacaREST(**kwargs)
     fake = _FakeSDKClient(script)
-    monkeypatch.setattr(AlpacaREST, "_ensure_client", lambda self: fake)
+    monkeypatch.setattr(AlpacaREST, "_ensure_client", lambda self, kind="stock": fake)
     return rest, fake
 
 
@@ -316,3 +315,203 @@ class TestAlpacaTimeframes:
     def test_unknown_raises(self):
         with pytest.raises(ValueError, match="Unknown timeframe"):
             alpaca_resolution("3h")
+
+
+def _bar(ts, o=100.0, h=101.0, lo=99.0, c=100.5, v=1000.0, n=10, vw=100.2):
+    """Build a real SDK Bar from wire-shape dict (offline, no network)."""
+    return Bar("AAPL", {"t": ts, "o": o, "h": h, "l": lo, "c": c, "v": v, "n": n, "vw": vw})
+
+
+class _FakeBarSet:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __getitem__(self, symbol):
+        return self._rows
+
+
+class TestAlpacaGetBars:
+    def _capture_call(self, monkeypatch, result):
+        calls = []
+
+        def _fake_call(self, method, *args, **kwargs):
+            calls.append((method, args[0], kwargs))
+            return result
+
+        monkeypatch.setattr(AlpacaREST, "_call", _fake_call)
+        return calls
+
+    def test_stock_request_defaults(self, monkeypatch):
+        from datetime import datetime
+
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 3, tzinfo=UTC)
+        calls = self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        assert rest.get_bars("AAPL", "1d", start, end) == []
+        method, request, kwargs = calls[0]
+        assert method == "get_stock_bars"
+        assert kwargs == {}
+        assert isinstance(request, StockBarsRequest)
+        assert request.symbol_or_symbols == "AAPL"
+        assert str(request.timeframe) == "1Day"
+        assert request.feed == DataFeed.IEX
+        assert request.adjustment == Adjustment.RAW
+
+    def test_explicit_feed_adjustment(self, monkeypatch):
+        from datetime import datetime
+
+        calls = self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        rest.get_bars(
+            "AAPL",
+            "1h",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 2, tzinfo=UTC),
+            feed="sip",
+            adjustment="split",
+        )
+        _, request, _ = calls[0]
+        assert request.feed == DataFeed.SIP
+        assert request.adjustment == Adjustment.SPLIT
+
+    def test_crypto_routing(self, monkeypatch):
+        from datetime import datetime
+
+        calls = self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        rest.get_bars(
+            "BTC/USD", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+        )
+        method, request, kwargs = calls[0]
+        assert method == "get_crypto_bars"
+        assert kwargs.get("client") == "crypto"
+        assert isinstance(request, CryptoBarsRequest)
+
+    def test_unknown_symbol_returns_empty(self, monkeypatch):
+        from datetime import datetime
+
+        class _Missing(_FakeBarSet):
+            def __getitem__(self, symbol):
+                raise KeyError(symbol)
+
+        self._capture_call(monkeypatch, _Missing([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        assert (
+            rest.get_bars(
+                "NOPE", "1d", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+            )
+            == []
+        )
+
+    def test_bad_timeframe_raises_value_error(self, monkeypatch):
+        from datetime import datetime
+
+        self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        with pytest.raises(ValueError, match="Unknown timeframe"):
+            rest.get_bars(
+                "AAPL", "3h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+            )
+
+
+class TestAlpacaFetchOHLCV:
+    def _adapter_with_bars(self, monkeypatch, rows):
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+        monkeypatch.setattr(AlpacaREST, "get_bars", lambda self, *a, **k: rows)
+        return adapter
+
+    def test_basic_mapping(self, monkeypatch):
+        adapter = self._adapter_with_bars(
+            monkeypatch,
+            [_bar("2024-01-02T14:30:00Z"), _bar("2024-01-02T15:30:00Z", c=101.5)],
+        )
+        df = adapter.fetch_ohlcv(
+            "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        )
+        assert list(df.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
+        ]
+        assert len(df) == 2
+        assert df["is_closed"].all()
+        assert df.iloc[0]["open"] == 100.0
+        assert df.iloc[-1]["close"] == 101.5
+        assert str(df["timestamp"].dt.tz) == "UTC"
+
+    def test_columns_all_and_list(self, monkeypatch):
+        rows = [_bar("2024-01-02T14:30:00Z")]
+        adapter = self._adapter_with_bars(monkeypatch, rows)
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        df_all = adapter.fetch_ohlcv("AAPL", "1h", start, end, columns="all")
+        assert {"session", "vwap", "trades_count"} <= set(df_all.columns)
+        assert df_all.iloc[0]["session"] == "regular"
+        df_vwap = adapter.fetch_ohlcv("AAPL", "1h", start, end, columns=["vwap"])
+        assert list(df_vwap.columns) == [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
+            "vwap",
+        ]
+        with pytest.raises(ValueError, match="not available"):
+            adapter.fetch_ohlcv("AAPL", "1h", start, end, columns=["quote_volume"])
+
+    def test_crypto_has_no_session(self, monkeypatch):
+        adapter = self._adapter_with_bars(monkeypatch, [_bar("2024-01-02T14:30:00Z")])
+        df = adapter.fetch_ohlcv(
+            "BTC/USD",
+            "1h",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 3, tzinfo=UTC),
+            columns="all",
+        )
+        assert df.iloc[0]["session"] is None
+
+    def test_include_live_filters_forming_bar(self, monkeypatch):
+        forming = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
+        rows = [_bar("2024-01-02T14:30:00Z"), _bar(forming)]
+        adapter = self._adapter_with_bars(monkeypatch, rows)
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime.now(UTC)
+        assert len(adapter.fetch_ohlcv("AAPL", "1h", start, end)) == 1
+        df_live = adapter.fetch_ohlcv("AAPL", "1h", start, end, include_live=True)
+        assert len(df_live) == 2
+        assert not df_live.iloc[-1]["is_closed"]
+
+    def test_empty_raises_not_available(self, monkeypatch):
+        adapter = self._adapter_with_bars(monkeypatch, [])
+        with pytest.raises(DataNotAvailableError):
+            adapter.fetch_ohlcv(
+                "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+            )
+
+    def test_bad_timeframe_raises_invalid(self, monkeypatch):
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+
+        def _boom(self, *a, **k):
+            raise ValueError("Unknown timeframe: 3h")
+
+        monkeypatch.setattr(AlpacaREST, "get_bars", _boom)
+        with pytest.raises(InvalidTimeframeError):
+            adapter.fetch_ohlcv(
+                "AAPL", "3h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+            )
+
+    def test_default_range_last_30_days(self, monkeypatch):
+        seen = {}
+
+        def _fake_get_bars(self, symbol, timeframe, start, end, **kwargs):
+            seen["start"], seen["end"] = start, end
+            return [_bar("2024-01-02T14:30:00Z")]
+
+        monkeypatch.setattr(AlpacaREST, "get_bars", _fake_get_bars)
+        AlpacaAdapter(api_key="k", api_secret="s").fetch_ohlcv("AAPL", "1h")
+        assert (seen["end"] - seen["start"]).days == 30

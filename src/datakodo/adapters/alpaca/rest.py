@@ -9,7 +9,10 @@ import time
 from typing import Any
 
 from alpaca.common.exceptions import APIError
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from requests.exceptions import RequestException
 from requests.exceptions import Timeout as RequestsTimeout
@@ -63,22 +66,26 @@ class AlpacaREST:
             rate=self._alpaca.rate_limit_rate,
             burst=self._alpaca.rate_limit_burst,
         )
-        self._client: StockHistoricalDataClient | None = None
+        self._clients: dict = {}
 
-    def _ensure_client(self) -> StockHistoricalDataClient:
+    def _ensure_client(self, kind: str = "stock"):
         """Build the SDK client on first use (lazy: SDK rejects empty keys)."""
-        if self._client is None:
+        if kind not in self._clients:
             if not (self._alpaca.api_key and self._alpaca.api_secret):
                 raise AuthenticationError(
                     "Alpaca credentials are missing. Pass api_key/api_secret "
                     "explicitly or set APCA_API_KEY_ID / APCA_API_SECRET_KEY."
                 )
-            self._client = StockHistoricalDataClient(
-                api_key=self._alpaca.api_key,
-                secret_key=self._alpaca.api_secret,
-                url_override=self._alpaca.data_base_url,
-            )
-        return self._client
+            kwargs: dict[str, Any] = {
+                "api_key": self._alpaca.api_key,
+                "secret_key": self._alpaca.api_secret,
+                "url_override": self._alpaca.data_base_url,
+            }
+            if kind == "crypto":
+                self._clients[kind] = CryptoHistoricalDataClient(**kwargs)
+            else:
+                self._clients[kind] = StockHistoricalDataClient(**kwargs)
+        return self._clients[kind]
 
     def _translate(self, exc: APIError) -> DataLibError:
         """Map an SDK error onto the DataKodo hierarchy."""
@@ -117,9 +124,9 @@ class AlpacaREST:
         label = f" (HTTP {status})" if status else ""
         return ProviderError(f"Alpaca request failed{label}.{suffix}", original=exc)
 
-    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    def _call(self, method: str, *args: Any, client: str = "stock", **kwargs: Any) -> Any:
         """Choke-point call: token gate, backoff retry, status mapping."""
-        client = self._ensure_client()
+        target = self._ensure_client(client)
         max_retries = self._config.max_retries
         base_delay = self._config.retry_base_delay
 
@@ -141,7 +148,7 @@ class AlpacaREST:
                 )
 
             try:
-                return getattr(client, method)(*args, **kwargs)
+                return getattr(target, method)(*args, **kwargs)
             except APIError as exc:
                 translated = self._translate(exc)
                 if isinstance(translated, (RateLimitError, ProviderError)):
@@ -187,3 +194,40 @@ class AlpacaREST:
                     time.sleep(delay)
                     continue
                 raise ConnectionError(f"Alpaca connection failed: {exc}") from exc
+
+    def get_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        start,
+        end,
+        *,
+        feed: str | None = None,
+        adjustment: str = "raw",
+    ) -> list:
+        """Fetch raw SDK bars (stocks → ``get_stock_bars``, ``X/Y`` → crypto)."""
+        resolution = alpaca_resolution(timeframe)
+        if "/" in symbol:
+            result = self._call(
+                "get_crypto_bars",
+                CryptoBarsRequest(
+                    symbol_or_symbols=symbol, timeframe=resolution, start=start, end=end
+                ),
+                client="crypto",
+            )
+        else:
+            result = self._call(
+                "get_stock_bars",
+                StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe=resolution,
+                    start=start,
+                    end=end,
+                    feed=DataFeed(feed or self._alpaca.feed),
+                    adjustment=Adjustment(adjustment),
+                ),
+            )
+        try:
+            return list(result[symbol])
+        except KeyError:
+            return []

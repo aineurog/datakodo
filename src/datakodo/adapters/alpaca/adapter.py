@@ -4,12 +4,20 @@ from collections.abc import Sequence
 from typing import Any
 
 from datakodo.adapters.alpaca.config import AlpacaConfig
+from datakodo.adapters.alpaca.mapper import map_ohlcv
 from datakodo.adapters.alpaca.rest import AlpacaREST
 from datakodo.adapters.alpaca.ws import AlpacaWS
 from datakodo.core.config import Config
-from datakodo.core.exceptions import NotSupportedError
+from datakodo.core.exceptions import (
+    DataNotAvailableError,
+    InvalidTimeframeError,
+    NotSupportedError,
+)
 from datakodo.core.instruments import Instrument
-from datakodo.core.interfaces import AdapterInterface
+from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.core.timeframe import resolve_date_range
+from datakodo.ops.output import to_output_format
+from datakodo.ops.validation import validate_ohlcv
 
 
 class AlpacaAdapter(AdapterInterface):
@@ -52,10 +60,40 @@ class AlpacaAdapter(AdapterInterface):
         end: Any = None,
         *,
         columns: str | Sequence[str] = "basic",
+        include_live: bool = False,
+        feed: str | None = None,
+        adjustment: str = "raw",
+        output_format: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Fetch OHLCV candles (implemented in step 4)."""
-        raise NotSupportedError("Alpaca fetch_ohlcv is not yet implemented.")
+        """Fetch OHLCV candles. No dates → last 30 days; closed bars only
+        unless ``include_live=True``."""
+        start, end = resolve_date_range(start, end)
+        symbol_str = symbol_of(symbol)
+        try:
+            raw = self._rest.get_bars(
+                symbol_str, timeframe, start, end, feed=feed, adjustment=adjustment
+            )
+        except ValueError as exc:
+            raise InvalidTimeframeError(f"Alpaca does not support timeframe {timeframe!r}") from exc
+        df = map_ohlcv(
+            raw,
+            timeframe,
+            session=None if "/" in symbol_str else "regular",
+            columns=columns,
+        )
+
+        if not include_live:
+            df = df.loc[df["is_closed"]].reset_index(drop=True)
+
+        if df.empty:
+            raise DataNotAvailableError(
+                f"No closed {timeframe} bars available for {symbol_str} "
+                f"in [{start.isoformat()}, {end.isoformat()}]."
+            )
+
+        validate_ohlcv(df)
+        return to_output_format(df, output_format or self._config.output_format)
 
     # -- streaming (async) --
 
