@@ -53,12 +53,15 @@ class IBKRAdapter(AdapterInterface):
         self,
         symbol: str | Instrument,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns="basic",
         **kwargs,
     ) -> pd.DataFrame:
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         raw = self._client.req_historical_data(symbol, timeframe, start, end)
         return map_ohlcv(raw)

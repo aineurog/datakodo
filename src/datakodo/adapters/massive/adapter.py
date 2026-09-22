@@ -1,0 +1,448 @@
+"""Massive adapter — implements the AdapterInterface for Massive.com."""
+
+import logging
+from datetime import datetime
+from typing import Any
+
+from datakodo.adapters.massive.config import MassiveConfig
+from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv
+from datakodo.adapters.massive.rest import MassiveREST
+from datakodo.adapters.massive.ws import MassiveWS
+from datakodo.core.config import Config
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
+from datakodo.core.exceptions import DataNotAvailableError, SymbolNotFoundError
+from datakodo.core.instruments import Instrument
+from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.core.schemas import Fundamentals, available_ohlcv_extras, resolve_ohlcv_columns
+from datakodo.ops.output import to_output_format
+from datakodo.ops.resample import pick_source_timeframe, resample
+from datakodo.ops.validation import validate_ohlcv
+
+logger = logging.getLogger(__name__)
+
+# Massive symbol prefix -> market name (section 2.3 of the implementation doc).
+_MARKET_BY_PREFIX = {
+    "X:": "crypto",
+    "C:": "forex",
+    "I:": "index",
+    "O:": "options",
+}
+
+# Canonical AssetClass -> Massive ``market`` query value (design doc sec 4/5).
+# Accepts both the enum and plain strings so skill-style calls like
+# ``search_instruments("AAPL", asset_class="stocks")`` keep working.
+_ASSET_TO_MARKET = {
+    "equity": "stocks",
+    "crypto": "crypto",
+    "forex": "forex",
+    "index": "indices",
+    "indices": "indices",
+    "etf": "stocks",
+    "metal": "futures",
+    "bond": "stocks",
+}
+
+# Any accepted spelling -> canonical asset name, so "stocks" and EQUITY compare
+# equal in client-side filtering.
+_ASSET_CANONICAL = {
+    "stocks": "equity",
+    "equity": "equity",
+    "crypto": "crypto",
+    "forex": "forex",
+    "fx": "forex",
+    "indices": "index",
+    "index": "index",
+    "etf": "etf",
+    "metal": "metal",
+    "bond": "bond",
+}
+
+# Canonical InstrumentType -> Massive ``type`` query value.
+_TYPE_TO_MASSIVE = {
+    "spot": None,  # no server-side narrowing; filtered client-side
+    "perpetual": None,
+    "future": "future",
+    "option": "option",
+    "cfd": None,
+}
+
+
+def _massive_market_of(asset_class: Any) -> str | None:
+    """Normalize an asset-class filter to a Massive ``market`` value."""
+    if asset_class is None:
+        return None
+    key = str(getattr(asset_class, "value", asset_class)).lower()
+    if key in ("stocks", "indices"):
+        return key  # already a Massive spelling
+    return _ASSET_TO_MARKET.get(key, key or None)
+
+
+def _massive_type_of(instrument_type: Any) -> str | None:
+    """Normalize an instrument-type filter to a Massive ``type`` value."""
+    if instrument_type is None:
+        return None
+    key = str(getattr(instrument_type, "value", instrument_type)).lower()
+    return _TYPE_TO_MASSIVE.get(key, key or None)
+
+
+class MassiveAdapter(AdapterInterface):
+    """Massive.com adapter — equities, forex, and crypto.
+
+    Capabilities: OHLCV, ticks (historical + streaming), reference/fundamentals.
+    Strong for reference data.
+    """
+
+    supports_ohlcv = True
+    supports_ticks = True
+    supports_orderbook_snapshot = False
+    supports_streaming_orderbook = False
+    supports_streaming_ticks = True
+    supports_fundamentals = True
+
+    native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        config: Config | None = None,
+        massive_config: MassiveConfig | None = None,
+    ) -> None:
+        self._config = config or Config()
+        self._massive = massive_config or MassiveConfig()
+        # Explicit credentials win over the environment (design doc sec 15).
+        if api_key is not None:
+            self._massive = self._massive.model_copy(update={"api_key": api_key})
+        self._rest = MassiveREST(massive_config=self._massive, config=self._config)
+        self._ws = MassiveWS(api_key or self._massive.api_key)
+
+    def _market_of(self, symbol: str) -> str:
+        """Map a Massive symbol prefix to its market name (section 2.3 of the implementation doc).
+
+        Unprefixed tickers are equities; ``X:`` crypto, ``C:`` forex, ``I:``
+        indices, ``O:`` options.
+        """
+        upper = symbol.upper()
+        for prefix, market in _MARKET_BY_PREFIX.items():
+            if upper.startswith(prefix):
+                return market
+        return "stocks"
+
+    def search_instruments(
+        self,
+        query: str = "",
+        *,
+        asset_class: Any = None,
+        instrument_type: Any = None,
+        quote: str | None = None,
+        exchange: str | None = None,
+        limit: int = 100,
+        **kwargs: Any,
+    ) -> list[Instrument]:
+        """Search the provider's instrument universe (design doc sec 14).
+
+        ``query`` is a case-insensitive substring match on the symbol **and** name.
+        All filters are optional and combinable. Returns canonical ``Instrument``
+        descriptors. No ticker DataFrame caching is used — the ticker list is
+        fetched fresh on each call (design doc sec 5, per project requirement).
+
+        The ``instrument_type`` filter accepts ``InstrumentType`` enum values.
+        The ``asset_class`` filter accepts ``AssetClass`` enum values (plain
+        strings such as ``"stocks"`` work too). The ``quote`` filter matches
+        the quote/currency leg of the symbol. The ``exchange`` filter matches
+        the provider exchange code.
+        """
+        tickers = self._rest.list_tickers(
+            market=_massive_market_of(asset_class),
+            type=_massive_type_of(instrument_type),
+            exchange=exchange,
+            search=query,
+            limit=limit,
+        )
+        results: list[Instrument] = []
+        for ticker in tickers:
+            symbol = ticker.get("ticker", "")
+            if not symbol:
+                continue
+            try:
+                inst = map_instrument(
+                    symbol,
+                    ticker,
+                    market=self._market_of(symbol),
+                )
+            except Exception:
+                continue
+            if not self._search_match(
+                inst,
+                query,
+                asset_class,
+                instrument_type,
+                quote,
+                exchange,
+                name=ticker.get("name", ""),
+            ):
+                continue
+            results.append(inst)
+            if len(results) >= limit:
+                break
+        return results
+
+    def _search_match(
+        self,
+        inst: Instrument,
+        query: str,
+        asset_class: Any,
+        instrument_type: Any,
+        quote: str | None,
+        exchange: str | None,
+        *,
+        name: str = "",
+    ) -> bool:
+        """Apply one symbol against every optional search filter (design doc sec 5)."""
+        if query:
+            lowered = query.lower()
+            names = [inst.symbol, name or ""]
+            if inst.future is not None and inst.future.underlying:
+                names.append(inst.future.underlying)
+            if not any(lowered in candidate.lower() for candidate in names if candidate):
+                return False
+        if asset_class is not None:
+            wanted = _ASSET_CANONICAL.get(
+                str(getattr(asset_class, "value", asset_class)).lower(),
+                str(getattr(asset_class, "value", asset_class)).lower(),
+            )
+            got = _ASSET_CANONICAL.get(
+                str(getattr(inst.asset_class, "value", inst.asset_class)).lower(),
+                str(getattr(inst.asset_class, "value", inst.asset_class)).lower(),
+            )
+            if wanted != got:
+                return False
+        if instrument_type is not None:
+            wanted_t = str(getattr(instrument_type, "value", instrument_type)).lower()
+            got_t = str(getattr(inst.instrument_type, "value", inst.instrument_type)).lower()
+            if wanted_t != got_t:
+                return False
+        if quote is not None and inst.currency.lower() != quote.lower():
+            return False
+        if exchange is not None and inst.exchange.lower() != exchange.lower():
+            return False
+        return True
+
+    def fetch_fundamentals(self, symbol: str | Instrument, **kwargs: Any) -> Fundamentals:
+        """Fetch canonical fundamentals / reference data for ``symbol``.
+
+        Combines ``ticker_details`` (currencies, description, classification)
+        with the latest tick time and the server-time offset, so ``as_of`` is
+        returned in true UTC (design doc sec 3/10). An unknown symbol raises
+        ``SymbolNotFoundError`` (design doc sec 16).
+
+        This reuses the ``ticker_details()`` endpoint already implemented for
+        search (Step 3), following the design doc's Step 5 order.
+        """
+        symbol = self._rest.ensure_symbol_known(symbol_of(symbol))
+        info = self._rest.ticker_details(symbol)
+        if not info:
+            raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on Massive.")
+
+        tick = info.get("tick")
+
+        # Map the ticker details to canonical Fundamentals
+        fundamentals = Fundamentals(
+            symbol=symbol,
+            name=info.get("name"),
+            asset_class=self._map_asset_class_from_market(info.get("market")),
+            instrument_type=self._map_instrument_type_from_market(info.get("market")),
+            currency=info.get("currency_name", "USD"),
+            exchange=info.get("primary_exchange", "Massive"),
+            as_of=self._parse_time_to_utc(tick.get("t", 0)) if tick else None,
+        )
+        logger.info("Fetched Massive fundamentals for %s (as_of=%s)", symbol, fundamentals.as_of)
+        return fundamentals
+
+    @staticmethod
+    def _map_asset_class_from_market(market: str | None) -> AssetClass | None:
+        """Map Massive market field to AssetClass enum."""
+        if not market:
+            return None
+        market = market.lower()
+        mapping = {
+            "stocks": AssetClass.EQUITY,
+            "crypto": AssetClass.CRYPTO,
+            "forex": AssetClass.FOREX,
+            "indices": AssetClass.INDEX,
+            "options": AssetClass.EQUITY,
+            "futures": AssetClass.EQUITY,
+        }
+        return mapping.get(market)
+
+    @staticmethod
+    def _map_instrument_type_from_market(market: str | None) -> InstrumentType | None:
+        """Map Massive market field to InstrumentType enum."""
+        if not market:
+            return None
+        market = market.lower()
+        mapping = {
+            "stocks": InstrumentType.SPOT,
+            "crypto": InstrumentType.SPOT,
+            "forex": InstrumentType.SPOT,
+            "indices": InstrumentType.SPOT,
+            "options": InstrumentType.OPTION,
+            "futures": InstrumentType.FUTURE,
+        }
+        return mapping.get(market)
+
+    @staticmethod
+    def _parse_time_to_utc(ts: int | float | None) -> datetime | None:
+        """Convert Unix ms/ns timestamp to UTC datetime."""
+        if not ts:
+            return None
+        import datetime as _dt
+
+        value = int(ts)
+        if abs(value) > 10**15:
+            value = value // 1_000_000  # ns -> ms
+        return _dt.datetime.fromtimestamp(value / 1_000, tz=_dt.UTC)
+
+    # -- historical (sync) --
+
+    def fetch_ohlcv(  # type: ignore[override]  # typed signature narrower than base
+        self,
+        symbol: str | Instrument,
+        timeframe: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        *,
+        columns: str | list[str] = "basic",
+        include_live: bool = False,
+        output_format: str | None = None,
+        adjust: bool = True,
+        **kwargs,
+    ) -> Any:
+        """Fetch OHLCV candles for a date range (design doc sec 3, 18).
+
+        ``start``/``end`` default to the last 30 days (``end`` = now UTC);
+        omit both for the latest data. ``columns`` selects the schema:
+        ``"basic"`` (default) returns the invariant minimum; ``"all"`` adds
+        the Massive extras (``session``, ``vwap``, ``trades_count``); a list
+        requests specific extras.
+
+        By default only fully closed bars are returned (design doc sec 18);
+        set ``include_live=True`` to keep the still-forming bar, marked
+        ``is_closed=False``. ``output_format`` overrides ``Config.output_format``
+        (pandas by default). ``adjust`` selects split/dividend-adjusted vs raw
+        equity prices where the provider supports it (design doc sec 18).
+
+        If ``timeframe`` is not natively available it is derived by fetching
+        the nearest smaller native timeframe and resampling up (design doc
+        sec 8), flagged via ``Config.flag_resample``. Resampled output is
+        always fully closed.
+        """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
+        symbol = symbol_of(symbol)
+        market = self._market_of(symbol)
+        try:
+            tf = Timeframe(timeframe)
+        except ValueError:
+            tf = None  # unknown: native path raises InvalidTimeframeError as before
+
+        if tf is None or tf in self.native_timeframes:
+            df = self._fetch_ohlcv_native(
+                symbol, timeframe, market, start, end, adjust, include_live
+            )
+        else:
+            source_tf = pick_source_timeframe(tf, self.native_timeframes)
+            self._log_resample(timeframe, source_tf.value)
+            source = self._fetch_ohlcv_native(
+                symbol, source_tf.value, market, start, end, adjust, include_live=False
+            )
+            df = resample(source, tf)
+            validate_ohlcv(df)
+            logger.info(
+                "Resampled %s -> %s (%d bars) for %s",
+                source_tf.value,
+                timeframe,
+                len(df),
+                symbol,
+            )
+
+        available = available_ohlcv_extras(df.columns)
+        resolved = resolve_ohlcv_columns(columns, available)
+        return to_output_format(df[resolved], output_format or self._config.output_format)
+
+    def _fetch_ohlcv_native(
+        self,
+        symbol: str,
+        timeframe: str,
+        market: str,
+        start: datetime,
+        end: datetime,
+        adjust: bool,
+        include_live: bool,
+    ) -> Any:
+        """Fetch ``timeframe`` candles the provider offers natively.
+
+        Shared by ``fetch_ohlcv`` for the direct path and as the source when
+        resampling. Returns the validated full frame (base + extras);
+        ``include_live`` keeps the still-forming bar, otherwise closed only.
+        """
+        raw = self._rest.aggs(symbol, timeframe, start, end, adjust=adjust)
+        df = map_ohlcv(raw, timeframe, market=market, columns="all")
+
+        if not include_live:
+            df = df.loc[df["is_closed"]].reset_index(drop=True)
+
+        if df.empty:
+            raise DataNotAvailableError(
+                f"No closed {timeframe} bars available for {symbol} "
+                f"in [{start.isoformat()}, {end.isoformat()}]."
+            )
+
+        validate_ohlcv(df)
+        logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
+        return df
+
+    def _log_resample(self, requested: str, source: str) -> None:
+        """Warn (or log quietly) that ``requested`` is derived by resampling."""
+        if self._config.flag_resample:
+            logger.warning(
+                "%s has no native %s bars; fetching %s and resampling",
+                self.__class__.__name__,
+                requested,
+                source,
+            )
+        else:
+            logger.info("Deriving %s from %s by resampling", requested, source)
+
+    def fetch_ticks(
+        self,
+        symbol: str | Instrument,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        *,
+        limit: int = 1000,
+        **kwargs,
+    ) -> Any:
+        """Fetch historical trade ticks mapped to canonical ``Trade`` records.
+
+        Uses the REST ``list_trades`` endpoint with ``timestamp.gte/lte``
+        bounds (design doc sec 7: heavy volume, chunked pagination, opt-in).
+        Without ``start`` the most recent trades are fetched in a single
+        call. Tick history is often paid-tier gated — that surfaces as
+        ``PaidTierRequiredError``, never faked data (design doc sec 2/22).
+        """
+        from datakodo.adapters.massive.mapper import map_rest_trades
+
+        symbol = symbol_of(symbol)
+        raw = self._rest.list_trades(symbol, start, end, limit=limit)
+        trades = map_rest_trades(raw)
+        logger.info("Fetched %d trades for %s", len(trades), symbol)
+        return trades
+
+    # -- streaming (async) --
+
+    async def stream_trades(self, symbol: str | Instrument):
+        """Yield canonical ``Trade`` records (mapped once, in ``ws``)."""
+        symbol = symbol_of(symbol)
+        async for trade in self._ws.trade_stream(symbol):
+            yield trade

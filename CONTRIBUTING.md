@@ -19,7 +19,7 @@ pytest tests/
 ## Adding a New Provider Adapter
 
 Every new adapter must follow the pattern established by the five Phase 1
-adapters (Binance, Alpaca, Polygon, MT5, IBKR). An adapter subpackage
+adapters (Binance, Alpaca, Massive, MT5, IBKR). An adapter subpackage
 lives under `src/datakodo/adapters/<provider>/` and contains:
 
 - `adapter.py` — implements `AdapterInterface` from `datakodo.core.interfaces`

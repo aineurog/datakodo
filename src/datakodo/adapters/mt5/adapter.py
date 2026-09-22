@@ -1,6 +1,7 @@
 """MT5 adapter - implements the AdapterInterface for MetaTrader 5."""
 
 import logging
+import time
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -25,7 +26,11 @@ from datakodo.core.exceptions import (
 )
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import Fundamentals, resolve_ohlcv_columns
+from datakodo.core.schemas import (
+    Fundamentals,
+    available_ohlcv_extras,
+    resolve_ohlcv_columns,
+)
 from datakodo.core.timeframe import MT5_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
@@ -33,6 +38,12 @@ from datakodo.ops.resample import pick_source_timeframe, resample
 from datakodo.ops.validation import add_is_closed, detect_gaps, validate_ohlcv
 
 logger = logging.getLogger(__name__)
+
+# Bounded wait when the history probe shows overlap but page reads still come
+# back empty (terminal downloading in the background, e.g. a symbol freshly
+# added to MarketWatch).
+_OVERLAP_REFETCH_ROUNDS = 3
+_OVERLAP_REFETCH_DELAY = 10.0
 
 
 class MT5Adapter(AdapterInterface):
@@ -89,14 +100,14 @@ class MT5Adapter(AdapterInterface):
     def instrument(self, symbol: str, market_type: str = "") -> Instrument:
         """Classify ``symbol`` as spot, futures, forex, CFD, etc.
 
-        MT5 symbols are self-describing: ``symbol_info`` returns the broker's
-        symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
-        sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
-        ``"futures"``) that is validated against the detected classification -
-        a mismatch raises ``ProviderError``. An unknown symbol raises
+                MT5 symbols are self-describing: ``symbol_info`` returns the broker's
+                symbol metadata (``trade_calc_mode``, Market Watch ``path``, contract
+                sizes, expiry). ``market_type`` is an optional hint (``"spot"`` /
+                ``"futures"``) that is validated against the detected classification -
+                a mismatch raises ``ProviderError``. An unknown symbol raises
         ``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
@@ -187,8 +198,8 @@ class MT5Adapter(AdapterInterface):
         self,
         symbol: str | Instrument,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns: str | Sequence[str] = "basic",
         include_live: bool = False,
@@ -223,7 +234,22 @@ class MT5Adapter(AdapterInterface):
         stitched by ``ops.pagination.paginate`` (design doc sec 12), so a
         single call transparently covers ranges larger than the terminal's
         loaded chart history.
+
+        Omit ``start``/``end`` for the last 30 days (``end`` = now UTC).
+
+        History is served from the terminal whether the market is open or
+        closed — a closed market never implies "no data".
         """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
+        logger.info(
+            "MT5 fetch_ohlcv start: symbol=%s timeframe=%s requested=[%s → %s]",
+            symbol,
+            timeframe,
+            start.isoformat(),
+            end.isoformat(),
+        )
         symbol = symbol_of(symbol)
         mt5_tf = _to_mt5_timeframe(timeframe)
         tf = Timeframe(timeframe)
@@ -231,7 +257,7 @@ class MT5Adapter(AdapterInterface):
         # symbol first forces the terminal to download/load its bars (a symbol
         # whose chart was never opened still returns data), and an unknown
         # symbol fails the select -> SymbolNotFoundError.
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         offset_seconds = self._rest.server_offset_seconds(symbol)
 
         if start >= end:
@@ -246,7 +272,6 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=include_live,
-                columns=columns,
             )
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
@@ -259,7 +284,6 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=False,
-                columns="basic",
             )
             df = resample(source, tf, calendar=self._calendar())
             validate_ohlcv(df)
@@ -286,7 +310,6 @@ class MT5Adapter(AdapterInterface):
         *,
         offset_seconds: int,
         include_live: bool,
-        columns: str | Sequence[str],
     ) -> tuple[Any, tuple[str, ...]]:
         """Fetch ``timeframe`` bars the terminal offers natively.
 
@@ -294,11 +317,10 @@ class MT5Adapter(AdapterInterface):
         resampling. Returns ``(validated_bars, available_extras)`` with an
         ``is_closed`` column; ``include_live`` keeps the still-forming bar
         (marked ``is_closed=False``), otherwise only closed bars are returned.
+        ``available_extras`` is derived from the mapped frame, so it reflects
+        exactly what the mapper produced for this call (design doc sec 3).
         """
         timeframe = tf.value
-        available = MT5_OHLCV_EXTRAS
-        resolved = resolve_ohlcv_columns(columns, available)
-        mapped_extras = tuple(extra for extra in MT5_OHLCV_EXTRAS if extra in resolved)
 
         def _fetch_chunk(chunk_symbol: str, chunk_start: datetime, chunk_end: datetime) -> Any:
             raw = self._rest.copy_rates_range(
@@ -308,31 +330,94 @@ class MT5Adapter(AdapterInterface):
                 chunk_end,
                 offset_seconds=offset_seconds,
             )
-            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=mapped_extras)
+            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=MT5_OHLCV_EXTRAS)
 
-        df = paginate(
-            _fetch_chunk,
-            symbol,
-            tf,
-            start,
-            end,
-            max_per_request=self._terminal.config.max_bars,
-        )
+        # Bar-closed decisions use the server clock (latest tick), never the
+        # PC clock, so a drifted PC can neither drop real closed bars nor
+        # keep forming ones.
+        server_now = self._rest.server_now(symbol, offset_seconds=offset_seconds)
+
+        def _fetch_window(window_start: datetime, window_end: datetime) -> Any:
+            frame = paginate(
+                _fetch_chunk,
+                symbol,
+                tf,
+                window_start,
+                window_end,
+                max_per_request=self._terminal.config.max_bars,
+            )
+            if frame.empty:
+                return frame
+            frame = add_is_closed(frame, timeframe, now=server_now)
+            if not include_live:
+                frame = frame.loc[frame["is_closed"]].reset_index(drop=True)
+            return frame
+
+        df = _fetch_window(start, end)
+        coverage = "full"
+        available: tuple[datetime, datetime] | None = None
+        if df.empty:
+            # Requested window came back empty. Probe what the terminal
+            # actually holds: on overlap, fetch it (partial) instead of
+            # failing outright. Only terminal history matters here, never
+            # the market-open state.
+            available = self._rest.available_range(symbol, mt5_tf, offset_seconds=offset_seconds)
+            if available is not None:
+                oldest, newest = available
+                logger.info(
+                    "MT5 history probe for %s: terminal holds [%s → %s]; requested [%s → %s]",
+                    symbol,
+                    oldest.isoformat(),
+                    newest.isoformat(),
+                    start.isoformat(),
+                    end.isoformat(),
+                )
+                overlap_start = max(start, oldest)
+                overlap_end = min(end, newest)
+                if overlap_start < overlap_end:
+                    logger.info(
+                        "MT5 fetching overlap [%s → %s] for %s (partial coverage)",
+                        overlap_start.isoformat(),
+                        overlap_end.isoformat(),
+                        symbol,
+                    )
+                    for round_no in range(1, _OVERLAP_REFETCH_ROUNDS + 1):
+                        df = _fetch_window(overlap_start, overlap_end)
+                        if not df.empty:
+                            coverage = "partial"
+                            break
+                        if round_no < _OVERLAP_REFETCH_ROUNDS:
+                            logger.info(
+                                "MT5 overlap still downloading for %s (round %d/%d); waiting %.0fs",
+                                symbol,
+                                round_no,
+                                _OVERLAP_REFETCH_ROUNDS,
+                                _OVERLAP_REFETCH_DELAY,
+                            )
+                            time.sleep(_OVERLAP_REFETCH_DELAY)
 
         if df.empty:
-            raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
-
-        df = add_is_closed(df, timeframe)
-        if not include_live:
-            df = df.loc[df["is_closed"]].reset_index(drop=True)
-
-        if df.empty:
-            raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
+            raise DataNotAvailableError(
+                self._no_bars_message(symbol, timeframe, start, end, available=available)
+            )
 
         validate_ohlcv(df)
         self._log_gaps(symbol, timeframe, start, end, df)
-        logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
-        return df, available
+        first_ts = df["timestamp"].iloc[0]
+        last_ts = df["timestamp"].iloc[-1]
+        logger.info(
+            "MT5 fetch_ohlcv end: symbol=%s timeframe=%s returned=%d bars actual=[%s → %s] "
+            "coverage=%s of requested=[%s → %s]",
+            symbol,
+            timeframe,
+            len(df),
+            first_ts.isoformat(),
+            last_ts.isoformat(),
+            coverage,
+            start.isoformat(),
+            end.isoformat(),
+        )
+        return df, available_ohlcv_extras(df.columns)
 
     def _log_gaps(
         self, symbol: str, timeframe: str, start: datetime, end: datetime, df: Any
@@ -374,7 +459,7 @@ class MT5Adapter(AdapterInterface):
         ``as_of`` is returned in true UTC (design doc sec 3/10). An unknown
         symbol raises ``SymbolNotFoundError`` (design doc sec 16).
         """
-        self._rest.ensure_symbol_known(symbol)
+        symbol = self._rest.ensure_symbol_known(symbol)
         info = self._rest.symbol_info(symbol)
         if info is None:
             raise SymbolNotFoundError(f"Symbol {symbol!r} has no info on MT5.")
@@ -391,14 +476,27 @@ class MT5Adapter(AdapterInterface):
         logger.info("Fetched MT5 fundamentals for %s (as_of=%s)", symbol, fundamentals.as_of)
         return fundamentals
 
-    def _no_bars_message(self, symbol: str, timeframe: str, start: datetime, end: datetime) -> str:
-        return (
+    def _no_bars_message(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        available: tuple[datetime, datetime] | None = None,
+    ) -> str:
+        message = (
             f"No {timeframe} bars available for {symbol} "
             f"in [{start.isoformat()}, {end.isoformat()}] yet. "
+        )
+        if available is not None:
+            oldest, newest = available
+            message += f"Terminal holds [{oldest.isoformat()}, {newest.isoformat()}]. "
+        message += (
             "Data is downloading in the background - this may take some time. "
             "Open the symbol's chart in MT5 (or raise 'Max. bars in chart') "
             "to speed it up."
         )
+        return message
 
     def _calendar(self) -> WeekendClosedCalendar:
         """The trading calendar for this adapter's universe (design doc sec 9).
