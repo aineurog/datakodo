@@ -12,14 +12,17 @@ from alpaca.common.exceptions import APIError
 from alpaca.data import Bar
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.trading.enums import AssetClass as AlpacaAssetClass
+from alpaca.trading.enums import AssetExchange
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import Timeout as RequestsTimeout
 
 from datakodo.adapters.alpaca.adapter import AlpacaAdapter
 from datakodo.adapters.alpaca.config import AlpacaConfig
+from datakodo.adapters.alpaca.mapper import map_instrument
 from datakodo.adapters.alpaca.rest import AlpacaREST, alpaca_resolution
 from datakodo.core.config import Config
-from datakodo.core.enums import Timeframe
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
@@ -128,8 +131,6 @@ class TestAlpacaNotYetImplemented:
             adapter.fetch_orderbook_snapshot("AAPL")
         with pytest.raises(NotSupportedError):
             adapter.fetch_fundamentals("AAPL")
-        with pytest.raises(NotSupportedError):
-            adapter.search_instruments("AAPL")
 
     def test_streaming_raises_not_supported(self):
         adapter = AlpacaAdapter(api_key="k", api_secret="s")
@@ -515,3 +516,130 @@ class TestAlpacaFetchOHLCV:
         monkeypatch.setattr(AlpacaREST, "get_bars", _fake_get_bars)
         AlpacaAdapter(api_key="k", api_secret="s").fetch_ohlcv("AAPL", "1h")
         assert (seen["end"] - seen["start"]).days == 30
+
+
+def _asset(symbol, asset_class, exchange="NASDAQ", name="Apple Inc."):
+    return SimpleNamespace(symbol=symbol, asset_class=asset_class, exchange=exchange, name=name)
+
+
+class TestAlpacaSearch:
+    def test_map_instrument_classes(self):
+        equity = map_instrument("AAPL", _asset("AAPL", AlpacaAssetClass.US_EQUITY))
+        assert equity.asset_class == AssetClass.EQUITY
+        assert equity.instrument_type == InstrumentType.SPOT
+        assert equity.provider_symbol == "AAPL"
+        assert equity.currency == "USD"
+
+        crypto = map_instrument(
+            "BTC/USD", _asset("BTC/USD", AlpacaAssetClass.CRYPTO, exchange="CRYPTO")
+        )
+        assert crypto.asset_class == AssetClass.CRYPTO
+        assert crypto.instrument_type == InstrumentType.SPOT
+
+        option = map_instrument("AAPL240119C00150000", _asset("X", AlpacaAssetClass.US_OPTION))
+        assert option.instrument_type == InstrumentType.OPTION
+
+    def test_map_instrument_enum_exchange(self):
+        inst = map_instrument(
+            "MSFT", _asset("MSFT", AlpacaAssetClass.US_EQUITY, exchange=AssetExchange.NYSE)
+        )
+        assert inst.exchange == "NYSE"
+
+    def _adapter_with_assets(self, monkeypatch, assets):
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+        monkeypatch.setattr(AlpacaREST, "list_assets", lambda self: assets)
+        return adapter
+
+    def test_query_matches_symbol_and_name(self, monkeypatch):
+        adapter = self._adapter_with_assets(
+            monkeypatch,
+            [
+                _asset("AAPL", AlpacaAssetClass.US_EQUITY),
+                _asset("MSFT", AlpacaAssetClass.US_EQUITY, name="Microsoft"),
+            ],
+        )
+        assert [i.symbol for i in adapter.search_instruments("aapl")] == ["AAPL"]
+        assert [i.symbol for i in adapter.search_instruments("micro")] == ["MSFT"]
+
+    def test_filters_combinable(self, monkeypatch):
+        adapter = self._adapter_with_assets(
+            monkeypatch,
+            [
+                _asset("AAPL", AlpacaAssetClass.US_EQUITY),
+                _asset("BTC/USD", AlpacaAssetClass.CRYPTO, exchange="CRYPTO", name="Bitcoin"),
+                _asset("O", AlpacaAssetClass.US_OPTION, name="Option"),
+            ],
+        )
+
+        def _symbols(**kwargs):
+            return [i.symbol for i in adapter.search_instruments("", **kwargs)]
+
+        assert _symbols(asset_class=AssetClass.CRYPTO) == ["BTC/USD"]
+        assert _symbols(asset_class="us_equity") == ["AAPL", "O"]
+        assert _symbols(instrument_type=InstrumentType.OPTION) == ["O"]
+        assert _symbols(quote="usd") == ["AAPL", "BTC/USD", "O"]
+        assert _symbols(exchange="crypto") == ["BTC/USD"]
+        assert _symbols(quote="EUR") == []
+
+    def test_limit_caps_results(self, monkeypatch):
+        adapter = self._adapter_with_assets(
+            monkeypatch, [_asset(f"S{i}", AlpacaAssetClass.US_EQUITY, name="") for i in range(5)]
+        )
+        assert len(adapter.search_instruments("", limit=2)) == 2
+
+    def test_list_assets_routing(self, monkeypatch):
+        calls = []
+
+        def _fake_call(self, method, *args, **kwargs):
+            calls.append((method, kwargs))
+            return ["x"]
+
+        monkeypatch.setattr(AlpacaREST, "_call", _fake_call)
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        assert rest.list_assets() == ["x"]
+        assert calls == [("get_all_assets", {"client": "assets"})]
+
+
+class _RestrictedAlpaca(AlpacaAdapter):
+    """Alpaca adapter pretending to offer only 1m and 1h natively."""
+
+    native_timeframes = (Timeframe.M1, Timeframe.H1)
+
+
+def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
+    """4h requested, only 1h native -> fetch 1h bars and resample to one 4h bar."""
+    adapter = _RestrictedAlpaca(api_key="k", api_secret="s")
+    rows = [
+        _bar("2024-01-01T00:00:00Z", o=100.0, h=110.0, lo=90.0, c=105.0, v=1000.0),
+        _bar("2024-01-01T01:00:00Z", o=105.0, h=120.0, lo=100.0, c=115.0, v=2000.0),
+        _bar("2024-01-01T02:00:00Z", o=115.0, h=130.0, lo=110.0, c=125.0, v=3000.0),
+        _bar("2024-01-01T03:00:00Z", o=125.0, h=140.0, lo=120.0, c=135.0, v=4000.0),
+    ]
+    monkeypatch.setattr(AlpacaREST, "get_bars", lambda self, *a, **k: rows)
+
+    df = adapter.fetch_ohlcv(
+        "AAPL", "4h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+    )
+    assert len(df) == 1
+    assert df.loc[0, "open"] == 100.0
+    assert df.loc[0, "high"] == 140.0
+    assert df.loc[0, "low"] == 90.0
+    assert df.loc[0, "close"] == 135.0
+    assert df.loc[0, "volume"] == 10000.0
+    assert df.loc[0, "is_closed"]
+
+
+def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
+    """A natively offered timeframe is fetched directly, no resampling."""
+    adapter = _RestrictedAlpaca(api_key="k", api_secret="s")
+    captured = {}
+
+    def _fake_get_bars(self, symbol, timeframe, start, end, **kwargs):
+        captured["timeframe"] = timeframe
+        return [_bar("2024-01-01T00:00:00Z")]
+
+    monkeypatch.setattr(AlpacaREST, "get_bars", _fake_get_bars)
+    adapter.fetch_ohlcv(
+        "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+    )
+    assert captured["timeframe"] == "1h"
