@@ -36,6 +36,8 @@ class AlpacaAdapter(AdapterInterface):
 
     supports_ohlcv = True
     supports_ticks = True
+    # No order-book depth: quotes give one best bid/ask (NBBO), while OrderBook
+    # needs level lists + sequence id. A depth-1 "book" would mislead sizing.
     supports_orderbook_snapshot = False
     supports_streaming_orderbook = False
     supports_streaming_ticks = True
@@ -246,6 +248,6 @@ class AlpacaAdapter(AdapterInterface):
         yield  # pragma: no cover - makes this an async generator
 
     async def stream_orderbook(self, symbol: str | Instrument) -> Any:
-        """Stream live order book snapshots (steps 8–9)."""
-        raise NotSupportedError("Alpaca stream_orderbook is not yet implemented.")
+        """Stream live order book snapshots (unsupported: no depth feed)."""
+        raise NotSupportedError("Alpaca stream_orderbook is not supported: no depth feed.")
         yield  # pragma: no cover - makes this an async generator
