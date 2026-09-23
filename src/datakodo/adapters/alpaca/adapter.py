@@ -39,6 +39,9 @@ class AlpacaAdapter(AdapterInterface):
     supports_orderbook_snapshot = False
     supports_streaming_orderbook = False
     supports_streaming_ticks = True
+    # No fundamentals surface: get_asset returns the same row search already
+    # maps (no currency, no as_of, no metrics), and news articles are content,
+    # not a reference snapshot. Honest False beats a thin duplicate.
     supports_fundamentals = False
 
     native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
