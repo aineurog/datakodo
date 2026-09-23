@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from datakodo.adapters.alpaca.config import AlpacaConfig
-from datakodo.adapters.alpaca.mapper import map_instrument, map_ohlcv
+from datakodo.adapters.alpaca.mapper import map_instrument, map_ohlcv, map_rest_trades
 from datakodo.adapters.alpaca.rest import AlpacaREST
 from datakodo.adapters.alpaca.ws import AlpacaWS
 from datakodo.core.config import Config
@@ -111,6 +111,21 @@ class AlpacaAdapter(AdapterInterface):
         available = available_ohlcv_extras(df.columns)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
+
+    def fetch_ticks(
+        self,
+        symbol: str | Instrument,
+        start: Any = None,
+        end: Any = None,
+        *,
+        limit: int = 1000,
+        feed: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Fetch historical trade ticks. Often paid-tier gated (honest error)."""
+        symbol_str = symbol_of(symbol)
+        rows = self._rest.list_trades(symbol_str, start, end, limit=limit, feed=feed)
+        return map_rest_trades(rows)
 
     def _fetch_ohlcv_native(
         self,

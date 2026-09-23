@@ -5,7 +5,7 @@ from alpaca.trading.enums import AssetClass as AlpacaAssetClass
 
 from datakodo.core.enums import AssetClass, InstrumentType
 from datakodo.core.instruments import Instrument
-from datakodo.core.schemas import resolve_ohlcv_columns
+from datakodo.core.schemas import Trade, resolve_ohlcv_columns
 from datakodo.core.timeframe import timeframe_delta
 
 _ALPACA_CLASS = {
@@ -88,3 +88,21 @@ def map_instrument(symbol: str, asset) -> Instrument:
         asset_class=asset_class,
         instrument_type=instrument_type,
     )
+
+
+def map_rest_trades(rows: list) -> list[Trade]:
+    """SDK trades → canonical ``Trade`` list (REST shape, not the WS one).
+
+    REST trades carry no aggressor side, so ``side`` is always None.
+    Price/size/id come pre-validated from the SDK model.
+    """
+    return [
+        Trade(
+            timestamp=_utc(r.timestamp),
+            price=float(r.price),
+            size=float(r.size),
+            side=None,
+            trade_id=r.id,
+        )
+        for r in rows
+    ]

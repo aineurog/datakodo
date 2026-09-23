@@ -11,7 +11,7 @@ import pytest
 from alpaca.common.exceptions import APIError
 from alpaca.data import Bar
 from alpaca.data.enums import Adjustment, DataFeed
-from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, CryptoTradesRequest, StockBarsRequest
 from alpaca.trading.enums import AssetClass as AlpacaAssetClass
 from alpaca.trading.enums import AssetExchange
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -125,8 +125,6 @@ class TestAlpacaSkeleton:
 class TestAlpacaNotYetImplemented:
     def test_unsupported_surfaces_raise_not_supported(self):
         adapter = AlpacaAdapter(api_key="k", api_secret="s")
-        with pytest.raises(NotSupportedError):
-            adapter.fetch_ticks("AAPL")
         with pytest.raises(NotSupportedError):
             adapter.fetch_orderbook_snapshot("AAPL")
         with pytest.raises(NotSupportedError):
@@ -643,3 +641,70 @@ def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
         "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
     )
     assert captured["timeframe"] == "1h"
+
+
+def _trade(ts="2024-01-02T14:30:05Z", price=185.32, size=100.0, trade_id=847291):
+    """Build a real SDK Trade from wire-shape dict (offline, no network)."""
+    from alpaca.data import Trade as SDKTrade
+
+    return SDKTrade("AAPL", {"t": ts, "p": price, "s": size, "i": trade_id})
+
+
+class TestAlpacaHistoricalTicks:
+    def _capture_call(self, monkeypatch, result):
+        calls = []
+
+        def _fake_call(self, method, *args, **kwargs):
+            calls.append((method, args[0], kwargs))
+            return result
+
+        monkeypatch.setattr(AlpacaREST, "_call", _fake_call)
+        return calls
+
+    def test_list_trades_stock_defaults(self, monkeypatch):
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
+        calls = self._capture_call(monkeypatch, _FakeBarSet([_trade()]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        rows = rest.list_trades("AAPL", start, end)
+        assert len(rows) == 1
+        method, request, kwargs = calls[0]
+        assert method == "get_stock_trades"
+        assert kwargs == {}
+        assert request.feed == DataFeed.IEX
+        assert request.start == start.replace(tzinfo=None)
+
+    def test_list_trades_crypto_routing(self, monkeypatch):
+        calls = self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        assert rest.list_trades("BTC/USD", None, None, limit=10) == []
+        method, request, kwargs = calls[0]
+        assert method == "get_crypto_trades"
+        assert kwargs.get("client") == "crypto"
+        assert isinstance(request, CryptoTradesRequest)
+        assert request.limit == 10
+
+    def test_list_trades_missing_symbol(self, monkeypatch):
+        class _Missing(_FakeBarSet):
+            def __getitem__(self, symbol):
+                raise KeyError(symbol)
+
+        self._capture_call(monkeypatch, _Missing([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        assert rest.list_trades("NOPE", None, None) == []
+
+    def test_map_rest_trades(self):
+        from datakodo.adapters.alpaca.mapper import map_rest_trades
+
+        first, second = map_rest_trades([_trade(), _trade(trade_id=2)])
+        assert (first.price, first.size, first.trade_id) == (185.32, 100.0, 847291)
+        assert first.side is None
+        assert second.trade_id == 2
+        assert str(first.timestamp.tzinfo) == "UTC"
+
+    def test_fetch_ticks(self, monkeypatch):
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+        monkeypatch.setattr(AlpacaREST, "list_trades", lambda self, *a, **k: [_trade()])
+        trades = adapter.fetch_ticks("AAPL", limit=10)
+        assert len(trades) == 1
+        assert trades[0].price == 185.32

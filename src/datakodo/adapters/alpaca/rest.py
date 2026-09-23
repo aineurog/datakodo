@@ -13,7 +13,12 @@ from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.data.requests import (
+    CryptoBarsRequest,
+    CryptoTradesRequest,
+    StockBarsRequest,
+    StockTradesRequest,
+)
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from requests.exceptions import RequestException
@@ -243,3 +248,29 @@ class AlpacaREST:
     def list_assets(self) -> list:
         """Fetch the assets master list (fresh per call, no caching)."""
         return list(self._call("get_all_assets", client="assets"))
+
+    def list_trades(
+        self, symbol: str, start, end, *, limit: int = 1000, feed: str | None = None
+    ) -> list:
+        """Fetch raw SDK trades for ``symbol`` (often paid-tier gated)."""
+        if "/" in symbol:
+            result = self._call(
+                "get_crypto_trades",
+                CryptoTradesRequest(symbol_or_symbols=symbol, start=start, end=end, limit=limit),
+                client="crypto",
+            )
+        else:
+            result = self._call(
+                "get_stock_trades",
+                StockTradesRequest(
+                    symbol_or_symbols=symbol,
+                    start=start,
+                    end=end,
+                    limit=limit,
+                    feed=DataFeed(feed or self._alpaca.feed),
+                ),
+            )
+        try:
+            return list(result[symbol])
+        except KeyError:
+            return []
