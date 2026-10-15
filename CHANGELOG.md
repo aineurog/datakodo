@@ -75,3 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while a genuinely unknown symbol reports it was not added (it does not exist
   on the server). Terminal-side failures (e.g. `Out of memory`) surface as
   `ProviderError`, not a misleading `SymbolNotFoundError`.
+
+### Added (Alpaca)
+- US equities + crypto spot through `alpaca-py`: historical OHLCV
+  (`fetch_ohlcv`, all 9 canonical timeframes native, `feed` + `adjustment`
+  passthrough), historical ticks (`fetch_ticks`), live trade streaming
+  (`stream_trades`), and instrument search (`search_instruments`) over the
+  assets master.
+- Non-native timeframes derive via the shared resample fallback
+  (`pick_source_timeframe` + `resample`), flagged per `Config.flag_resample`.
+- Honest non-support: no order-book depth (quotes are NBBO only) and no
+  fundamentals endpoint — both raise `NotSupportedError` by design.
+- Provider config (`AlpacaConfig`, `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY`
+  with `ALPACA_*` aliases); paid-tier gating surfaces as
+  `PaidTierRequiredError`, rate limits honor `Retry-After`.
+- Usage guide: `docs/alpaca.md`.

@@ -90,19 +90,21 @@ def map_instrument(symbol: str, asset) -> Instrument:
     )
 
 
+def trade_of(r) -> Trade:
+    """One SDK trade → canonical ``Trade`` (shared by REST list and WS stream)."""
+    return Trade(
+        timestamp=_utc(r.timestamp),
+        price=float(r.price),
+        size=float(r.size),
+        side=None,
+        trade_id=r.id,
+    )
+
+
 def map_rest_trades(rows: list) -> list[Trade]:
     """SDK trades → canonical ``Trade`` list (REST shape, not the WS one).
 
     REST trades carry no aggressor side, so ``side`` is always None.
     Price/size/id come pre-validated from the SDK model.
     """
-    return [
-        Trade(
-            timestamp=_utc(r.timestamp),
-            price=float(r.price),
-            size=float(r.size),
-            side=None,
-            trade_id=r.id,
-        )
-        for r in rows
-    ]
+    return [trade_of(r) for r in rows]

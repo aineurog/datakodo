@@ -66,7 +66,7 @@ class AlpacaAdapter(AdapterInterface):
         if overrides:
             self._alpaca = self._alpaca.model_copy(update=overrides)
         self._rest = AlpacaREST(alpaca_config=self._alpaca, config=self._config)
-        self._ws = AlpacaWS(self._alpaca.api_key, self._alpaca.api_secret)
+        self._ws = AlpacaWS(self._alpaca.api_key, self._alpaca.api_secret, self._alpaca.feed)
 
     # -- historical (sync) --
 
@@ -243,9 +243,10 @@ class AlpacaAdapter(AdapterInterface):
     # -- streaming (async) --
 
     async def stream_trades(self, symbol: str | Instrument) -> Any:
-        """Stream live trade ticks (implemented in step 9)."""
-        raise NotSupportedError("Alpaca stream_trades is not yet implemented.")
-        yield  # pragma: no cover - makes this an async generator
+        """Yield canonical ``Trade`` records (mapped once, in ``ws``)."""
+        symbol = symbol_of(symbol)
+        async for trade in self._ws.trade_stream(symbol):
+            yield trade
 
     async def stream_orderbook(self, symbol: str | Instrument) -> Any:
         """Stream live order book snapshots (unsupported: no depth feed)."""

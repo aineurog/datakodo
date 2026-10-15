@@ -21,6 +21,7 @@ from datakodo.adapters.alpaca.adapter import AlpacaAdapter
 from datakodo.adapters.alpaca.config import AlpacaConfig
 from datakodo.adapters.alpaca.mapper import map_instrument
 from datakodo.adapters.alpaca.rest import AlpacaREST, alpaca_resolution
+from datakodo.adapters.alpaca.ws import AlpacaWS
 from datakodo.core.config import Config
 from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import (
@@ -137,8 +138,6 @@ class TestAlpacaNotYetImplemented:
             async for _ in gen:
                 pass
 
-        with pytest.raises(NotSupportedError):
-            asyncio.run(_drain(adapter.stream_trades("AAPL")))
         with pytest.raises(NotSupportedError):
             asyncio.run(_drain(adapter.stream_orderbook("AAPL")))
 
@@ -708,3 +707,155 @@ class TestAlpacaHistoricalTicks:
         trades = adapter.fetch_ticks("AAPL", limit=10)
         assert len(trades) == 1
         assert trades[0].price == 185.32
+
+
+class _FakeStream:
+    """Scripted stand-in for the SDK data streams (never touches network)."""
+
+    def __init__(self, *args, **kwargs):
+        self.subscribed = []
+        self.unsubscribed = []
+        self.closed = False
+
+    def subscribe_trades(self, handler, *symbols):
+        self.subscribed.extend(symbols)
+
+    def unsubscribe_trades(self, *symbols):
+        self.unsubscribed.extend(symbols)
+
+    async def _run_forever(self):
+        await asyncio.Event().wait()
+
+    async def close(self):
+        self.closed = True
+
+
+def _patch_streams(monkeypatch):
+    made = {}
+
+    def _stock(*args, **kwargs):
+        made["kind"] = "stock"
+        made["stream"] = _FakeStream()
+        return made["stream"]
+
+    def _crypto(*args, **kwargs):
+        made["kind"] = "crypto"
+        made["stream"] = _FakeStream()
+        return made["stream"]
+
+    monkeypatch.setattr("datakodo.adapters.alpaca.ws.StockDataStream", _stock)
+    monkeypatch.setattr("datakodo.adapters.alpaca.ws.CryptoDataStream", _crypto)
+    return made
+
+
+class TestAlpacaWS:
+    def test_kind_routing(self):
+        assert AlpacaWS._kind_for("AAPL") == "stock"
+        assert AlpacaWS._kind_for("BTC/USD") == "crypto"
+
+    def test_connect_selects_stream(self, monkeypatch):
+        made = _patch_streams(monkeypatch)
+
+        async def _main():
+            ws = AlpacaWS(api_key="k", secret_key="s")
+            await ws.connect("stock")
+            assert made["kind"] == "stock"
+            assert ws.connected
+            await ws.connect("crypto")
+            assert made["kind"] == "crypto"
+            assert ws.connected
+            await ws.disconnect()
+            assert not ws.connected
+
+        asyncio.run(_main())
+
+    async def _stream_one(self, ws, symbol, *frames):
+        """Connect, subscribe, prefill, then read back through trade_stream."""
+        await ws.connect(AlpacaWS._kind_for(symbol))
+        await ws.subscribe(symbol)
+        for frame in frames:
+            ws._queue.put_nowait(frame)
+        gen = ws.trade_stream(symbol)
+        try:
+            return await gen.__anext__()
+        finally:
+            await gen.aclose()
+            await ws.disconnect()
+
+    def test_routing_and_mapping(self, monkeypatch):
+        made = _patch_streams(monkeypatch)
+
+        async def _main():
+            ws = AlpacaWS(api_key="k", secret_key="s")
+            first = await self._stream_one(ws, "AAPL", _trade())
+            assert (first.price, first.trade_id, first.side) == (185.32, 847291, None)
+            return ws
+
+        ws = asyncio.run(_main())
+        assert made["kind"] == "stock"
+        assert made["stream"].subscribed == ["AAPL"]
+        assert made["stream"].unsubscribed == ["AAPL"]
+        assert not ws.connected
+
+    def test_crypto_mapping(self, monkeypatch):
+        _patch_streams(monkeypatch)
+
+        async def _main():
+            ws = AlpacaWS(api_key="k", secret_key="s")
+            return await self._stream_one(ws, "BTC/USD", _trade())
+
+        assert asyncio.run(_main()).price == 185.32
+
+    def test_skip_unmappable(self, monkeypatch):
+        _patch_streams(monkeypatch)
+
+        async def _main():
+            ws = AlpacaWS(api_key="k", secret_key="s")
+            return await self._stream_one(ws, "AAPL", SimpleNamespace(nope=True), _trade())
+
+        assert asyncio.run(_main()).trade_id == 847291
+
+    def test_missing_keys_raise_auth(self):
+        async def _main():
+            ws = AlpacaWS()
+            with pytest.raises(AuthenticationError):
+                await ws.trade_stream("AAPL").__anext__()
+
+        asyncio.run(_main())
+
+    def test_disconnect_guard(self):
+        async def _main():
+            with pytest.raises(ConnectionError):
+                await AlpacaWS(api_key="k", secret_key="s").unsubscribe("AAPL")
+
+        asyncio.run(_main())
+
+    def test_adapter_delegation(self, monkeypatch):
+        from datakodo.core.schemas import Trade
+
+        async def _fake_stream(self, symbol):
+            assert symbol == "AAPL"
+            yield Trade(timestamp="2024-01-02T14:30:05Z", price=1.0, size=1.0, side=None)
+
+        monkeypatch.setattr(AlpacaWS, "trade_stream", _fake_stream)
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+
+        async def _main():
+            return [t async for t in adapter.stream_trades("AAPL")]
+
+        trades = asyncio.run(_main())
+        assert len(trades) == 1
+        assert trades[0].price == 1.0
+
+
+class TestAlpacaBatch:
+    def test_fetch_ohlcv_batch_fanout(self, monkeypatch):
+        adapter = AlpacaAdapter(api_key="k", api_secret="s")
+        rows = [_bar("2024-01-02T14:30:00Z")]
+        monkeypatch.setattr(AlpacaREST, "get_bars", lambda self, *a, **k: rows)
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        out = adapter.fetch_ohlcv_batch(["AAPL", "MSFT"], "1h", start, end)
+        assert set(out) == {"AAPL", "MSFT"}
+        combined = adapter.fetch_ohlcv_batch(["AAPL", "MSFT"], "1h", start, end, combine=True)
+        assert "symbol" in combined.columns
+        assert sorted(combined["symbol"].unique().tolist()) == ["AAPL", "MSFT"]
