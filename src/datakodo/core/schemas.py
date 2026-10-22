@@ -33,6 +33,18 @@ OHLCV_OPTIONAL_COLUMNS = (
 )
 
 
+def available_ohlcv_extras(columns) -> tuple[str, ...]:
+    """Canonical optional columns actually present in a produced frame.
+
+    ``columns`` is any iterable of produced column names (e.g. ``df.columns``).
+    Intersecting with ``OHLCV_OPTIONAL_COLUMNS`` keeps ``columns="all"``
+    honest: it surfaces exactly the extras the adapter mapped for this call
+    rather than a hardcoded list (design doc sec 3).
+    """
+    present = set(columns)
+    return tuple(col for col in OHLCV_OPTIONAL_COLUMNS if col in present)
+
+
 def resolve_ohlcv_columns(columns, available) -> list[str]:
     """Resolve a ``columns`` request to a concrete list of canonical columns.
 

@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider-specific settings (e.g. `BinanceConfig`) decoupled from the global
   `Config`; keys come from environment variables or explicit adapter arguments.
 - Configurable output format: pandas, polars, arrow.
-- Adapter scaffolding for Binance, Alpaca, Polygon, MT5, and IBKR.
+- Adapter scaffolding for Binance, Alpaca, Massive, MT5, and IBKR.
 - Each adapter subpackage includes rest, websocket, and mapper modules.
 - Token bucket rate limiter per provider instance.
 - Timeframe mapping from canonical enums to provider specific strings.
@@ -75,3 +75,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while a genuinely unknown symbol reports it was not added (it does not exist
   on the server). Terminal-side failures (e.g. `Out of memory`) surface as
   `ProviderError`, not a misleading `SymbolNotFoundError`.
+
+### Added (Alpaca)
+- US equities + crypto spot through `alpaca-py`: historical OHLCV
+  (`fetch_ohlcv`, all 9 canonical timeframes native, `feed` + `adjustment`
+  passthrough), historical ticks (`fetch_ticks`), live trade streaming
+  (`stream_trades`), and instrument search (`search_instruments`) over the
+  assets master.
+- Historical ticks page the whole range when `start` is given; without a
+  start, `limit` caps the most recent trades.
+- Crypto frames omit the `session` column entirely (24/7 market, no session
+  boundary); stock bars carry `session="regular"`.
+- `AlpacaConfig.paper` selects the assets host so live keys work; the default
+  stays on the paper host.
+- Live trade streaming routes each symbol to its own queue, keeping
+  concurrent symbols isolated.
+- Non-native timeframes derive via the shared resample fallback
+  (`pick_source_timeframe` + `resample`), flagged per `Config.flag_resample`.
+- Honest non-support: no order-book depth (quotes are NBBO only) and no
+  fundamentals endpoint — both raise `NotSupportedError` by design.
+- Provider config (`AlpacaConfig`, `APCA_API_KEY_ID` / `APCA_API_SECRET_KEY`
+  with `ALPACA_*` aliases); paid-tier gating surfaces as
+  `PaidTierRequiredError`, rate limits honor `Retry-After`.
+- Usage guide: `docs/alpaca.md`.

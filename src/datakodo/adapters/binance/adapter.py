@@ -12,7 +12,6 @@ from typing import Any
 
 from datakodo.adapters.binance.config import BinanceConfig
 from datakodo.adapters.binance.mapper import (
-    BINANCE_OHLCV_EXTRAS,
     map_fundamentals,
     map_ohlcv,
     map_orderbook,
@@ -27,7 +26,12 @@ from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
 from datakodo.core.exceptions import DataNotAvailableError
 from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import OrderBook, Trade, resolve_ohlcv_columns
+from datakodo.core.schemas import (
+    OrderBook,
+    Trade,
+    available_ohlcv_extras,
+    resolve_ohlcv_columns,
+)
 from datakodo.core.timeframe import BINANCE_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
@@ -162,8 +166,8 @@ class BinanceAdapter(AdapterInterface):
         self,
         symbol: str,
         timeframe: str,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
         *,
         columns: str | list[str] = "basic",
         market_type: str = "",
@@ -189,14 +193,18 @@ class BinanceAdapter(AdapterInterface):
         ``output_format`` selects the user-facing representation (design doc
         sec 13): pandas (default), polars, or arrow — a per-call override of
         ``Config.output_format``.
+
+        Omit ``start``/``end`` for the last 30 days (``end`` = now UTC).
         """
+        from datakodo.core.timeframe import resolve_date_range
+
+        start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market_type = market_type or self._binance.market_type
         tf = Timeframe(timeframe)
 
         if tf in self.native_timeframes:
             df = self._fetch_ohlcv_native(symbol, timeframe, start, end, market_type, include_live)
-            available = BINANCE_OHLCV_EXTRAS
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
             self._log_resample(timeframe, source_tf.value)
@@ -205,7 +213,6 @@ class BinanceAdapter(AdapterInterface):
             )
             df = resample(source, tf)
             validate_ohlcv(df)
-            available = ()
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s %s",
                 source_tf.value,
@@ -215,6 +222,7 @@ class BinanceAdapter(AdapterInterface):
                 symbol,
             )
 
+        available = available_ohlcv_extras(df.columns)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
 

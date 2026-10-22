@@ -5,7 +5,7 @@ This page covers the **Binance** adapter (spot and USD-M perpetual futures).
 The MetaTrader 5 terminal adapter is documented separately in
 [docs/mt5.md](mt5.md).
 
-Additional providers (Alpaca, Polygon, IBKR, ...) will get their own
+Additional providers (Alpaca, Massive, IBKR, ...) will get their own
 pages following the same structure.
 
 ## Data Precision
