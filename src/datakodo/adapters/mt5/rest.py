@@ -167,6 +167,7 @@ class MT5REST:
         end: datetime,
         *,
         offset_seconds: int | None = None,
+        is_closed_window: Callable[[datetime, datetime], bool] | None = None,
     ) -> Any:
         """Fetch raw OHLCV rates for *symbol* over the given date range.
 
@@ -183,9 +184,10 @@ class MT5REST:
 
         An empty window is retried with backoff: the terminal downloads
         history in the background, so a first-empty result often fills in
-        seconds later. This holds whether the market is open or closed —
-        historical bars are served from the terminal either way, so a
-        closed market is never treated as "no data".
+        seconds later. ``is_closed_window`` lets the caller flag a window
+        the market is closed for (weekend/holiday): such an empty result is
+        expected, so it logs at DEBUG instead of the "still downloading"
+        warning.
         """
         start_utc = _as_utc(start)
         end_utc = _as_utc(end)
@@ -222,21 +224,30 @@ class MT5REST:
             raise SymbolNotFoundError(
                 f"Symbol {symbol!r} not found on MT5: {description or f'code {code}'}"
             )
-        # No history in the terminal for this window. This usually means
-        # the symbol's chart was never opened (download is still running
-        # in the background), or 'Max. bars in chart' is set too low for
-        # the requested window.
-        logger.warning(
-            "No %s history returned for %s [%s \u2192 %s]. "
-            "Data is downloading in the background - this may take some "
-            "time. Open the %s chart in MT5 (or raise 'Max. bars in "
-            "chart') to speed it up.",
-            symbol,
-            timeframe,
-            start_utc.isoformat(),
-            end_utc.isoformat(),
-            symbol,
-        )
+        # An empty window the market is closed for (weekend/holiday) is
+        # expected - log it quietly. Otherwise the terminal genuinely lacks
+        # the history: the chart was never opened (download still running in
+        # the background), or 'Max. bars in chart' is set too low.
+        if is_closed_window is not None and is_closed_window(start_utc, end_utc):
+            logger.debug(
+                "No %s history for %s in [%s → %s]: market closed for this window.",
+                timeframe,
+                symbol,
+                start_utc.isoformat(),
+                end_utc.isoformat(),
+            )
+        else:
+            logger.warning(
+                "No %s history returned for %s [%s → %s]. "
+                "Data is downloading in the background - this may take some "
+                "time. Open the %s chart in MT5 (or raise 'Max. bars in "
+                "chart') to speed it up.",
+                symbol,
+                timeframe,
+                start_utc.isoformat(),
+                end_utc.isoformat(),
+                symbol,
+            )
         return None
 
     def available_range(

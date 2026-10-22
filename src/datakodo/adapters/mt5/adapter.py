@@ -230,10 +230,10 @@ class MT5Adapter(AdapterInterface):
         sec 13): pandas (default), polars, or arrow - a per-call override of
         ``Config.output_format``.
 
-        Ranges wider than ``MT5Config.max_bars`` bars are auto-paginated and
-        stitched by ``ops.pagination.paginate`` (design doc sec 12), so a
-        single call transparently covers ranges larger than the terminal's
-        loaded chart history.
+        By default the whole requested window is served by a single MT5 call,
+        reusing the terminal's local history cache (design doc sec 12). Set a
+        positive ``MT5Config.max_bars`` to force chunking into that many bars
+        per request, stitched by ``ops.pagination.paginate``.
 
         Omit ``start``/``end`` for the last 30 days (``end`` = now UTC).
 
@@ -329,6 +329,7 @@ class MT5Adapter(AdapterInterface):
                 chunk_start,
                 chunk_end,
                 offset_seconds=offset_seconds,
+                is_closed_window=lambda s, e: not self._calendar().has_trading_day_between(s, e),
             )
             return map_ohlcv(raw, offset_seconds=offset_seconds, extras=MT5_OHLCV_EXTRAS)
 
@@ -338,14 +339,22 @@ class MT5Adapter(AdapterInterface):
         server_now = self._rest.server_now(symbol, offset_seconds=offset_seconds)
 
         def _fetch_window(window_start: datetime, window_end: datetime) -> Any:
-            frame = paginate(
-                _fetch_chunk,
-                symbol,
-                tf,
-                window_start,
-                window_end,
-                max_per_request=self._terminal.config.max_bars,
-            )
+            max_per_request = self._terminal.config.max_bars
+            if max_per_request > 0:
+                frame = paginate(
+                    _fetch_chunk,
+                    symbol,
+                    tf,
+                    window_start,
+                    window_end,
+                    max_per_request=max_per_request,
+                )
+            else:
+                # MT5 has no per-request bar cap: copy_rates_range serves the
+                # whole window from the terminal's local history cache in one
+                # call. Chunking it into small slices would issue hundreds or
+                # thousands of extra terminal calls (and rate-limit waits).
+                frame = _fetch_chunk(symbol, window_start, window_end)
             if frame.empty:
                 return frame
             frame = add_is_closed(frame, timeframe, now=server_now)

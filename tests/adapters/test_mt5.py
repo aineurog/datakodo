@@ -307,6 +307,36 @@ class TestMT5RESTMocked:
         assert out is None
         assert any("No EURUSD history returned" in r.message for r in caplog.records)
 
+    def test_copy_rates_range_closed_window_logs_quietly(self, fake_mt5, caplog):
+        fake_mt5.no_history = True
+        rest = _connected_rest(fake_mt5, config=Config(max_retries=0))
+        start = datetime(2026, 1, 3, tzinfo=UTC)  # Saturday
+        with caplog.at_level(logging.DEBUG):
+            out = rest.copy_rates_range(
+                "EURUSD",
+                1,
+                start,
+                start + timedelta(hours=4),
+                is_closed_window=lambda s, e: True,
+            )
+        assert out is None
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_copy_rates_range_open_window_still_warns(self, fake_mt5, caplog):
+        fake_mt5.no_history = True
+        rest = _connected_rest(fake_mt5, config=Config(max_retries=0))
+        start = datetime(2026, 1, 5, tzinfo=UTC)  # Monday
+        with caplog.at_level(logging.WARNING):
+            out = rest.copy_rates_range(
+                "EURUSD",
+                1,
+                start,
+                start + timedelta(hours=4),
+                is_closed_window=lambda s, e: False,
+            )
+        assert out is None
+        assert any("No EURUSD history returned" in r.message for r in caplog.records)
+
     def test_copy_rates_range_unknown_symbol_raises_symbol_not_found(self, fake_mt5):
         fake_mt5.error = (4108, "Unknown symbol")
         fake_mt5.no_history = True
@@ -1085,6 +1115,18 @@ class TestMT5Adapter:
         assert len(df) == 48
         assert df["timestamp"].is_monotonic_increasing
         assert df["timestamp"].is_unique
+
+    def test_fetch_ohlcv_default_requests_whole_window_once(self, fake_mt5):
+        """The default path lets MT5 serve the full range from its local cache.
+
+        With the old 1000-bar default this 2-day, 1-minute window was split
+        into three terminal calls; the default must now be a single call.
+        """
+        adapter = self._connected_adapter(fake_mt5)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        df = adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2))
+        assert len(df) == 2880
+        assert len(fake_mt5.calls) == 1
 
     def test_fetch_ohlcv_paginate_stays_rate_limited(self, fake_mt5, monkeypatch):
         """Chunked fetches still draw from the token bucket (sec 17).

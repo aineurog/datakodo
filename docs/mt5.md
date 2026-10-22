@@ -78,7 +78,7 @@ Provider settings live on `MT5Config` and read the `MT5_` environment prefix
 | `timeout` | `10.0` | Timeout (s) for terminal operations. |
 | `rate_limit_rate` | `5.0` | Token-bucket refill rate (tokens/sec). |
 | `rate_limit_burst` | `10` | Token-bucket burst capacity. |
-| `max_bars` | `1000` | Bars per request; wider ranges are auto-paginated. |
+| `max_bars` | `0` | `0` fetches the whole range in one call (reuses the terminal's local cache). A positive value forces chunked requests. |
 | `market_type` | `"forex"` | Default market classification. |
 
 Example `.env`:
