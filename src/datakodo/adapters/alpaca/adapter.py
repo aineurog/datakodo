@@ -124,7 +124,11 @@ class AlpacaAdapter(AdapterInterface):
         feed: str | None = None,
         **kwargs: Any,
     ) -> Any:
-        """Fetch historical trade ticks. Often paid-tier gated (honest error)."""
+        """Fetch historical trade ticks. Often paid-tier gated (honest error).
+
+        With a ``start`` bound the whole range is paged. Without one, ``limit``
+        caps the most recent trades returned.
+        """
         symbol_str = symbol_of(symbol)
         rows = self._rest.list_trades(symbol_str, start, end, limit=limit, feed=feed)
         return map_rest_trades(rows)
@@ -200,7 +204,8 @@ class AlpacaAdapter(AdapterInterface):
                 continue
             try:
                 inst = map_instrument(symbol, asset)
-            except Exception:
+            except Exception as exc:
+                logger.debug("Skipping unmappable Alpaca asset %s: %s", symbol, exc)
                 continue
             if not self._matches(
                 inst,

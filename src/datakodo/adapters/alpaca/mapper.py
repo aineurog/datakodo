@@ -41,30 +41,33 @@ def map_ohlcv(raw: list, timeframe: str, *, session: str | None = "regular", col
             }
         )
 
-    df = pd.DataFrame(
-        [
-            {
-                "timestamp": _utc(b.timestamp),
-                "open": float(b.open),
-                "high": float(b.high),
-                "low": float(b.low),
-                "close": float(b.close),
-                "volume": float(b.volume),
-                "vwap": None if b.vwap is None else float(b.vwap),
-                "trades_count": None if b.trade_count is None else float(b.trade_count),
-                "session": session,
-            }
-            for b in raw
-        ]
-    )
+    rows = []
+    for b in raw:
+        row = {
+            "timestamp": _utc(b.timestamp),
+            "open": float(b.open),
+            "high": float(b.high),
+            "low": float(b.low),
+            "close": float(b.close),
+            "volume": float(b.volume),
+            "vwap": None if b.vwap is None else float(b.vwap),
+            "trades_count": None if b.trade_count is None else int(b.trade_count),
+        }
+        # 24/7 crypto has no session; an all-None column would imply a
+        # session boundary that does not exist (calendar doc sec 4).
+        if session is not None:
+            row["session"] = session
+        rows.append(row)
+    df = pd.DataFrame(rows)
 
     df = (
         df.drop_duplicates(subset="timestamp", keep="last")
         .sort_values("timestamp")
         .reset_index(drop=True)
     )
-    for col in ("open", "high", "low", "close", "volume", "vwap", "trades_count"):
+    for col in ("open", "high", "low", "close", "volume", "vwap"):
         df[col] = df[col].astype("float64")
+    df["trades_count"] = df["trades_count"].astype("Int64")
 
     df["is_closed"] = df["timestamp"] + timeframe_delta(timeframe) <= pd.Timestamp.now(tz="UTC")
 

@@ -31,7 +31,7 @@ class AlpacaWS:
         self._kind: str | None = None
         self._stream = None
         self._task: asyncio.Task | None = None
-        self._queue: asyncio.Queue = asyncio.Queue()
+        self._queues: dict[str, asyncio.Queue] = {}
         self._subscribed: set[str] = set()
 
     @property
@@ -64,8 +64,7 @@ class AlpacaWS:
         """Connect the SDK stream for ``kind`` (design doc sec 23)."""
         await self.disconnect()
         self._kind = kind
-        while not self._queue.empty():
-            self._queue.get_nowait()
+        self._queues.clear()
         stream = self._ensure_stream(kind)
         logger.info("Connecting to Alpaca WS kind=%s", kind)
         self._stream = stream
@@ -79,8 +78,16 @@ class AlpacaWS:
             raise ConnectionError(f"Alpaca WS connection failed: {exc}") from exc
 
     async def _on_trade(self, trade) -> None:
-        """SDK trade callback: hand the parsed model to the queue."""
-        self._queue.put_nowait(trade)
+        """SDK trade callback: route the trade to its symbol's queue."""
+        symbol = getattr(trade, "symbol", None)
+        if not isinstance(symbol, str):
+            logger.debug("Dropping Alpaca trade without a symbol")
+            return
+        queue = self._queues.get(symbol)
+        if queue is None:
+            logger.debug("Dropping Alpaca trade for unsubscribed symbol %r", symbol)
+            return
+        queue.put_nowait(trade)
 
     async def subscribe(self, symbol: str) -> None:
         """Subscribe to trades for ``symbol`` (idempotent)."""
@@ -88,6 +95,7 @@ class AlpacaWS:
         if symbol in self._subscribed:
             return
         stream.subscribe_trades(self._on_trade, symbol)
+        self._queues.setdefault(symbol, asyncio.Queue())
         self._subscribed.add(symbol)
         logger.info("Alpaca WS subscribed to trades for %s", symbol)
 
@@ -98,6 +106,7 @@ class AlpacaWS:
             return
         stream.unsubscribe_trades(symbol)
         self._subscribed.discard(symbol)
+        self._queues.pop(symbol, None)
         logger.info("Alpaca WS unsubscribed from trades for %s", symbol)
 
     async def trade_stream(self, symbol: str) -> AsyncGenerator[Any, None]:
@@ -112,12 +121,13 @@ class AlpacaWS:
         if not self.connected or self._kind != kind:
             await self.connect(kind)
         await self.subscribe(symbol)
+        queue = self._queues[symbol]
         logger.info("Starting Alpaca trade stream for %s", symbol)
         closed_by_user = False
         try:
             while self.connected:
                 try:
-                    trade = await asyncio.wait_for(self._queue.get(), _RECV_TIMEOUT)
+                    trade = await asyncio.wait_for(queue.get(), _RECV_TIMEOUT)
                 except TimeoutError:
                     if not self.connected:
                         break
@@ -155,6 +165,7 @@ class AlpacaWS:
         task, self._task = self._task, None
         stream, self._stream = self._stream, None
         self._subscribed.clear()
+        self._queues.clear()
         if task is not None:
             if task.done() and not task.cancelled():
                 task.exception()

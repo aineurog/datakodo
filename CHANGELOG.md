@@ -82,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   passthrough), historical ticks (`fetch_ticks`), live trade streaming
   (`stream_trades`), and instrument search (`search_instruments`) over the
   assets master.
+- Historical ticks page the whole range when `start` is given; without a
+  start, `limit` caps the most recent trades.
+- Crypto frames omit the `session` column entirely (24/7 market, no session
+  boundary); stock bars carry `session="regular"`.
+- `AlpacaConfig.paper` selects the assets host so live keys work; the default
+  stays on the paper host.
+- Live trade streaming routes each symbol to its own queue, keeping
+  concurrent symbols isolated.
 - Non-native timeframes derive via the shared resample fallback
   (`pick_source_timeframe` + `resample`), flagged per `Config.flag_resample`.
 - Honest non-support: no order-book depth (quotes are NBBO only) and no

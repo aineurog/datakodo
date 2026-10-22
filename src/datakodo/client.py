@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Built-in adapters always available even when the package is not installed
 # (e.g. running from a source checkout). Entry points may register more.
 _BUILTINS: dict[str, str] = {
+    "alpaca": "datakodo.adapters.alpaca:AlpacaAdapter",
     "binance": "datakodo.adapters.binance:BinanceAdapter",
     "mt5": "datakodo.adapters.mt5:MT5Adapter",
     "massive": "datakodo.adapters.massive:MassiveAdapter",

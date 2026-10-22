@@ -43,6 +43,11 @@ class AlpacaConfig(BaseSettings):
     """Default market-data feed. ``iex`` is the only feed available without a
     paid subscription; ``sip`` requires a paid data plan."""
 
+    paper: bool = True
+    """Trading API host used for the assets catalog. Alpaca paper and live keys
+    are not interchangeable: paper keys authenticate only on the paper host and
+    live keys only on the live host. Set this to ``False`` when using live keys."""
+
     rate_limit_rate: float = 3.0
     """Token-bucket refill rate (tokens/sec). Headers rule at runtime."""
 

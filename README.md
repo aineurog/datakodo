@@ -36,6 +36,7 @@ Install DataKodo with support for your provider:
 
 ```bash
 pip install datakodo[binance]    # Binance spot + USD-M futures
+pip install datakodo[alpaca]     # Alpaca: US equities + crypto spot
 pip install datakodo[mt5]        # MetaTrader 5 terminal (Windows)
 pip install datakodo[massive]    # Massive.com (ex-Polygon.io): stocks, crypto, forex, indices, options
 ```
@@ -76,6 +77,7 @@ print(df)
 
 Public market data needs no API key. Provider usage guides:
 - [Binance](docs/binance.md)
+- [Alpaca](docs/alpaca.md)
 - [MetaTrader 5](docs/mt5.md)
 - [Massive](docs/massive.md)
 
@@ -86,11 +88,13 @@ Public market data needs no API key. Provider usage guides:
 | Binance | Spot, USD-M perpetual futures | Implemented |
 | MetaTrader 5 | Forex, CFDs, metals, indices, futures (local Windows terminal) | Implemented |
 | Massive | Stocks, crypto, forex, indices, options, futures (Massive.com API key required) | Implemented |
-| Alpaca, Bybit, and others | — | Planned |
+| Alpaca | US equities, crypto spot (Alpaca API key required) | Implemented |
+| Bybit and others | — | Planned |
 
 ## Documentation
 
 - [Usage guide — Binance](docs/binance.md) — installation, configuration, and examples.
+- [Usage guide — Alpaca](docs/alpaca.md) — installation, configuration, and examples.
 - [Usage guide — MetaTrader 5](docs/mt5.md) — installation, configuration, and examples.
 - [Usage guide — Massive](docs/massive.md) — installation, configuration, and examples.
 

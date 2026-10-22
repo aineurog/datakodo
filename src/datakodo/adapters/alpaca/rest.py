@@ -90,7 +90,7 @@ class AlpacaREST:
                     "explicitly or set APCA_API_KEY_ID / APCA_API_SECRET_KEY."
                 )
             extra: dict[str, Any] = (
-                {"paper": True}  # assets catalog is identical on both hosts
+                {"paper": self._alpaca.paper}
                 if kind == "assets"
                 else {"url_override": self._alpaca.data_base_url}
             )
@@ -252,11 +252,19 @@ class AlpacaREST:
     def list_trades(
         self, symbol: str, start, end, *, limit: int = 1000, feed: str | None = None
     ) -> list:
-        """Fetch raw SDK trades for ``symbol`` (often paid-tier gated)."""
+        """Fetch raw SDK trades for ``symbol`` (often paid-tier gated).
+
+        With a ``start`` bound the SDK pages through the whole range, so no
+        ``limit`` is sent. Without a ``start``, ``limit`` caps the most recent
+        trades returned.
+        """
+        page_limit = None if start is not None else limit
         if "/" in symbol:
             result = self._call(
                 "get_crypto_trades",
-                CryptoTradesRequest(symbol_or_symbols=symbol, start=start, end=end, limit=limit),
+                CryptoTradesRequest(
+                    symbol_or_symbols=symbol, start=start, end=end, limit=page_limit
+                ),
                 client="crypto",
             )
         else:
@@ -266,7 +274,7 @@ class AlpacaREST:
                     symbol_or_symbols=symbol,
                     start=start,
                     end=end,
-                    limit=limit,
+                    limit=page_limit,
                     feed=DataFeed(feed or self._alpaca.feed),
                 ),
             )

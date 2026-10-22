@@ -29,7 +29,7 @@ Symbols: `AAPL` (stocks), `BTC/USD` (crypto).
 | Capability | Supported | Notes |
 |---|---|---|
 | `fetch_ohlcv` | ✅ | All 9 canonical timeframes native; `columns="basic"/"all"/[...]`; `feed` (`iex` default, `sip` paid); `adjustment` `raw`/`split`/`dividend`/`all` for equities; `is_closed` derived; UTC bar-open anchor |
-| `fetch_ticks` (historical) | ✅ | REST trades → canonical `Trade` (`side` always None — the feed carries none); often paid-tier gated → honest `PaidTierRequiredError` |
+| `fetch_ticks` (historical) | ✅ | REST trades → canonical `Trade` (`side` always None — the feed carries none); with `start` the whole range is paged, without it `limit` caps the most recent trades; often paid-tier gated → honest `PaidTierRequiredError` |
 | `stream_trades` | ✅ | Async generator over the official SDK streams; stocks + `BTC/USD`-style crypto |
 | `fetch_orderbook_snapshot` / `stream_orderbook` | ❌ | Quotes carry one best bid/ask (NBBO), not depth levels; `NotSupportedError` by design |
 | `fetch_fundamentals` | ❌ | No fundamentals endpoint (assets rows lack currency/`as_of`/metrics, news is content not reference); `NotSupportedError` by design |
@@ -59,11 +59,20 @@ are not implemented.
 - Token-bucket gated; 429s honor `Retry-After` with backoff,
   exhaustion → `RetriesExhaustedError`.
 
+## Sessions
+
+Stock bars carry `session="regular"`. Crypto trades 24/7, so crypto frames
+have no `session` column at all — an all-`None` column would imply a session
+boundary that does not exist. Requesting `columns=["session"]` for crypto
+raises `ValueError`.
+
 ## Paper vs live
 
 Paper mode affects order execution, never market data. Bars are identical on
-both; reference reads (assets) use the paper host because paper keys only
-authenticate there. This library never submits orders.
+both. Reference reads (assets) need the host that matches your key pair:
+paper keys authenticate only on the paper host and live keys only on the live
+host. The default is `AlpacaConfig(paper=True)`, so set `paper=False` in
+`AlpacaConfig` when using live keys. This library never submits orders.
 
 ## Restatement
 

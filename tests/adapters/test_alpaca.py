@@ -84,6 +84,21 @@ class TestAlpacaSkeleton:
         config = AlpacaConfig()
         assert config.data_base_url == "https://data.alpaca.markets"
         assert config.feed == "iex"
+        assert config.paper is True
+
+    def test_assets_host_follows_paper_config(self, monkeypatch):
+        from datakodo.adapters.alpaca import rest as rest_module
+
+        captured = {}
+
+        class _FakeAssetsClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setitem(rest_module._CLIENTS, "assets", _FakeAssetsClient)
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s", paper=False))
+        rest._ensure_client("assets")
+        assert captured["paper"] is False
 
     def test_env_fallback(self, monkeypatch):
         monkeypatch.setenv("APCA_API_KEY_ID", "env-key")
@@ -465,14 +480,11 @@ class TestAlpacaFetchOHLCV:
 
     def test_crypto_has_no_session(self, monkeypatch):
         adapter = self._adapter_with_bars(monkeypatch, [_bar("2024-01-02T14:30:00Z")])
-        df = adapter.fetch_ohlcv(
-            "BTC/USD",
-            "1h",
-            datetime(2024, 1, 1, tzinfo=UTC),
-            datetime(2024, 1, 3, tzinfo=UTC),
-            columns="all",
-        )
-        assert df.iloc[0]["session"] is None
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        df = adapter.fetch_ohlcv("BTC/USD", "1h", start, end, columns="all")
+        assert "session" not in df.columns
+        with pytest.raises(ValueError, match="not available"):
+            adapter.fetch_ohlcv("BTC/USD", "1h", start, end, columns=["session"])
 
     def test_include_live_filters_forming_bar(self, monkeypatch):
         forming = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
@@ -642,11 +654,11 @@ def test_fetch_ohlcv_native_timeframe_is_not_resampled(monkeypatch):
     assert captured["timeframe"] == "1h"
 
 
-def _trade(ts="2024-01-02T14:30:05Z", price=185.32, size=100.0, trade_id=847291):
+def _trade(ts="2024-01-02T14:30:05Z", price=185.32, size=100.0, trade_id=847291, symbol="AAPL"):
     """Build a real SDK Trade from wire-shape dict (offline, no network)."""
     from alpaca.data import Trade as SDKTrade
 
-    return SDKTrade("AAPL", {"t": ts, "p": price, "s": size, "i": trade_id})
+    return SDKTrade(symbol, {"t": ts, "p": price, "s": size, "i": trade_id})
 
 
 class TestAlpacaHistoricalTicks:
@@ -672,6 +684,16 @@ class TestAlpacaHistoricalTicks:
         assert kwargs == {}
         assert request.feed == DataFeed.IEX
         assert request.start == start.replace(tzinfo=None)
+        assert request.limit is None
+
+    def test_list_trades_pages_full_range_when_start_given(self, monkeypatch):
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 1, 2, tzinfo=UTC)
+        calls = self._capture_call(monkeypatch, _FakeBarSet([]))
+        rest = AlpacaREST(alpaca_config=AlpacaConfig(api_key="k", api_secret="s"))
+        rest.list_trades("AAPL", start, end, limit=10)
+        _, request, _ = calls[0]
+        assert request.limit is None
 
     def test_list_trades_crypto_routing(self, monkeypatch):
         calls = self._capture_call(monkeypatch, _FakeBarSet([]))
@@ -774,7 +796,7 @@ class TestAlpacaWS:
         await ws.connect(AlpacaWS._kind_for(symbol))
         await ws.subscribe(symbol)
         for frame in frames:
-            ws._queue.put_nowait(frame)
+            ws._queues[symbol].put_nowait(frame)
         gen = ws.trade_stream(symbol)
         try:
             return await gen.__anext__()
@@ -814,6 +836,23 @@ class TestAlpacaWS:
             return await self._stream_one(ws, "AAPL", SimpleNamespace(nope=True), _trade())
 
         assert asyncio.run(_main()).trade_id == 847291
+
+    def test_queues_are_isolated_per_symbol(self, monkeypatch):
+        _patch_streams(monkeypatch)
+
+        async def _main():
+            ws = AlpacaWS(api_key="k", secret_key="s")
+            await ws.connect("stock")
+            await ws.subscribe("AAPL")
+            await ws.subscribe("MSFT")
+            await ws._on_trade(_trade(symbol="AAPL", trade_id=1))
+            await ws._on_trade(_trade(symbol="MSFT", trade_id=2))
+            assert ws._queues["AAPL"].get_nowait().id == 1
+            assert ws._queues["MSFT"].get_nowait().id == 2
+            assert ws._queues["AAPL"].empty()
+            await ws.disconnect()
+
+        asyncio.run(_main())
 
     def test_missing_keys_raise_auth(self):
         async def _main():
