@@ -56,7 +56,24 @@ class PaidTierRequiredError(DataLibError):
 
 
 class DataValidationError(DataLibError):
-    """The provider returned data that failed quality checks."""
+    """The provider returned data that failed quality checks.
+
+    ``start``, ``end``, and ``count`` describe the offending timestamp range
+    when the failing rows are known (design doc sec 18).
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        start=None,
+        end=None,
+        count: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.start = start
+        self.end = end
+        self.count = count
 
 
 class ProviderError(DataLibError):

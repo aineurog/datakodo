@@ -10,6 +10,7 @@ from datakodo.adapters.ibkr.mapper import map_ohlcv, map_trades
 from datakodo.adapters.ibkr.ws import IBKRWS
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
+from datakodo.ops.validation import apply_fetch_contract
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,8 @@ class IBKRAdapter(AdapterInterface):
         start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         raw = self._client.req_historical_data(symbol, timeframe, start, end)
-        return map_ohlcv(raw)
+        df = map_ohlcv(raw)
+        return apply_fetch_contract(df, timeframe, start, end)
 
     # -- streaming (async) --
 

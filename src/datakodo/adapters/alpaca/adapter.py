@@ -5,11 +5,23 @@ from collections.abc import Sequence
 from typing import Any
 
 from datakodo.adapters.alpaca.config import AlpacaConfig
-from datakodo.adapters.alpaca.mapper import map_instrument, map_ohlcv, map_rest_trades
+from datakodo.adapters.alpaca.mapper import (
+    map_instrument,
+    map_ohlcv,
+    map_rest_trades,
+    price_adjustment,
+)
 from datakodo.adapters.alpaca.rest import AlpacaREST
 from datakodo.adapters.alpaca.ws import AlpacaWS
+from datakodo.core.calendar import (
+    XNYS_REGULAR,
+    AlwaysOpenCalendar,
+    SessionProfile,
+    TradingCalendar,
+    resolve_calendar,
+)
 from datakodo.core.config import Config
-from datakodo.core.enums import Timeframe
+from datakodo.core.enums import AssetClass, Timeframe, VolumeType
 from datakodo.core.exceptions import (
     DataNotAvailableError,
     InvalidTimeframeError,
@@ -21,7 +33,7 @@ from datakodo.core.schemas import available_ohlcv_extras, resolve_ohlcv_columns
 from datakodo.core.timeframe import resolve_date_range
 from datakodo.ops.output import to_output_format
 from datakodo.ops.resample import pick_source_timeframe, resample
-from datakodo.ops.validation import validate_ohlcv
+from datakodo.ops.validation import anchor_period_bars, apply_fetch_contract, validate_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +41,15 @@ logger = logging.getLogger(__name__)
 def _canon_class(name: str) -> str:
     """Normalize asset-class spellings (``us_equity``/``stocks`` → ``equity``)."""
     return {"stocks": "equity", "us_equity": "equity", "us_option": "equity"}.get(name, name)
+
+
+def _annotate(df, *, data_tier: str, adjustment: str, volume_type: VolumeType) -> None:
+    """Record the feed tier and price basis on the returned frame (sec 18)."""
+    df.attrs.update(
+        data_tier=data_tier,
+        price_adjustment=price_adjustment(adjustment).value,
+        volume_type=volume_type.value,
+    )
 
 
 class AlpacaAdapter(AdapterInterface):
@@ -45,6 +66,8 @@ class AlpacaAdapter(AdapterInterface):
     # maps (no currency, no as_of, no metrics), and news articles are content,
     # not a reference snapshot. Honest False beats a thin duplicate.
     supports_fundamentals = False
+    supports_real_volume = True
+    supports_adjusted_prices = True
 
     native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
 
@@ -107,9 +130,25 @@ class AlpacaAdapter(AdapterInterface):
             source = self._fetch_ohlcv_native(
                 symbol_str, source_tf.value, start, end, feed, adjustment, False
             )
-            df = resample(source, tf)
+            session, calendar = self._ohlcv_context(symbol_str)
+            df = resample(
+                source,
+                tf,
+                source_timeframe=source_tf,
+                session=session,
+                calendar=calendar,
+                start=start,
+                end=end,
+                incomplete="drop",
+            )
             validate_ohlcv(df)
 
+        _annotate(
+            df,
+            data_tier=feed or self._alpaca.feed,
+            adjustment=adjustment,
+            volume_type=(VolumeType.BASE if "/" in symbol_str else VolumeType.SHARES),
+        )
         available = available_ohlcv_extras(df.columns)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
@@ -133,6 +172,20 @@ class AlpacaAdapter(AdapterInterface):
         rows = self._rest.list_trades(symbol_str, start, end, limit=limit, feed=feed)
         return map_rest_trades(rows)
 
+    def _ohlcv_context(self, symbol_str: str) -> tuple[SessionProfile | None, TradingCalendar]:
+        """The session profile and calendar that define this symbol's periods.
+
+        Crypto trades 24/7 with UTC-day bars and no intraday boundary. US
+        equities use the regular XNYS session; the resolved calendar supplies
+        real holidays and half days when ``exchange_calendars`` is installed,
+        and the built-in weekend calendar otherwise. The profile still gives
+        the resampler and the fetch contract the 09:30 to 16:00 shape in both
+        cases.
+        """
+        if "/" in symbol_str:
+            return None, AlwaysOpenCalendar()
+        return XNYS_REGULAR, resolve_calendar(AssetClass.EQUITY, "XNYS")
+
     def _fetch_ohlcv_native(
         self,
         symbol_str: str,
@@ -154,15 +207,23 @@ class AlpacaAdapter(AdapterInterface):
             )
         except ValueError as exc:
             raise InvalidTimeframeError(f"Alpaca does not support timeframe {timeframe!r}") from exc
+        session, calendar = self._ohlcv_context(symbol_str)
         df = map_ohlcv(
             raw,
             timeframe,
             session=None if "/" in symbol_str else "regular",
             columns="all",
         )
-
-        if not include_live:
-            df = df.loc[df["is_closed"]].reset_index(drop=True)
+        df = anchor_period_bars(df, timeframe, calendar=calendar, session=session)
+        df = apply_fetch_contract(
+            df,
+            timeframe,
+            start,
+            end,
+            closed_only=not include_live,
+            calendar=calendar,
+            session=session,
+        )
 
         if df.empty:
             raise DataNotAvailableError(
@@ -170,7 +231,6 @@ class AlpacaAdapter(AdapterInterface):
                 f"in [{start.isoformat()}, {end.isoformat()}]."
             )
 
-        validate_ohlcv(df)
         return df
 
     def _log_resample(self, requested: str, source: str) -> None:
@@ -203,7 +263,7 @@ class AlpacaAdapter(AdapterInterface):
             if not symbol:
                 continue
             try:
-                inst = map_instrument(symbol, asset)
+                inst = map_instrument(symbol, asset, data_tier=self._alpaca.feed)
             except Exception as exc:
                 logger.debug("Skipping unmappable Alpaca asset %s: %s", symbol, exc)
                 continue

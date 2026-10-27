@@ -30,6 +30,11 @@ OHLCV_OPTIONAL_COLUMNS = (
     "turnover",
     "spread",
     "real_volume",
+    # Completeness accounting from session aware resampling (design doc sec 8).
+    "source_count",
+    "expected_count",
+    "is_complete",
+    "is_partial",
 )
 
 
@@ -117,6 +122,11 @@ class OHLCV(BaseModel):
     turnover: float | None = None
     spread: float | None = None
     real_volume: float | None = None
+
+    source_count: int | None = None
+    expected_count: int | None = None
+    is_complete: bool | None = None
+    is_partial: bool | None = None
 
 
 class Trade(BaseModel):

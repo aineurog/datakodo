@@ -108,7 +108,7 @@ with Client("mt5", mt5_config=mt5_config) as client:
 MT5 offers every canonical timeframe natively, so resampling never triggers:
 
 ```text
-1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo
+1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w, 1mo
 ```
 
 ## Fetching OHLCV
@@ -125,7 +125,21 @@ Timestamps are bar **open** times in true UTC. MT5 keeps history that is loaded
 into the terminal; a range with no loaded bars raises `DataNotAvailableError`,
 and a symbol unknown to the terminal raises `SymbolNotFoundError`. Whenever the
 returned candles skip an interval, a **gap-detection warning** is logged with
-the number of missing candles.
+the number of missing candles. Each symbol's session profile and calendar are
+resolved from its instrument metadata, so FX follows the 17:00 New York
+rollover, metals use their own profile, CME futures use their schedule, and a
+normal weekend closure is not reported as a gap.
+
+Set `volume="real_volume"` to read broker-traded volume instead of the default
+`"tick_volume"` (price-change ticks, the reliable figure for forex and CFDs).
+The choice is recorded on the frame:
+
+```python
+df = client.fetch_ohlcv("EURUSD", "1h", start, end, volume="real_volume")
+df.attrs["volume_type"]  # "contracts"
+df.attrs["data_tier"]  # "broker"
+df.attrs["price_adjustment"]  # "raw"
+```
 
 ### What the terminal downloads, and how far back
 

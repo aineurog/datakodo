@@ -7,7 +7,8 @@ import pytest
 
 from datakodo.adapters.massive.adapter import MassiveAdapter
 from datakodo.adapters.massive.mapper import map_instrument
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.calendar import FX_NY17, XNYS_REGULAR
+from datakodo.core.enums import AssetClass, InstrumentType, VolumeType
 from datakodo.core.exceptions import AuthenticationError
 from datakodo.core.exceptions import ConnectionError as DataConnectionError
 from datakodo.core.instruments import Instrument
@@ -63,6 +64,10 @@ class TestMassiveAdapter:
         assert df["is_closed"].all()
         assert df.iloc[0]["open"] == 100.0
         assert df.iloc[-1]["close"] == 101.5
+        # Data semantics travel with the frame (design doc sec 18).
+        assert df.attrs["volume_type"] == VolumeType.SHARES.value
+        assert df.attrs["price_adjustment"] == "split_and_dividend"
+        assert df.attrs["data_tier"] == "free"
 
     # -- map_instrument tests --
 
@@ -851,8 +856,9 @@ class TestMassiveFinalTicks:
             ]
 
         monkeypatch.setattr(adapter._rest, "aggs", _fake_aggs)
-        adapter.fetch_ohlcv("AAPL", "1h", now - timedelta(hours=3), now, adjust=False)
+        df = adapter.fetch_ohlcv("AAPL", "1h", now - timedelta(hours=3), now, adjust=False)
         assert seen["adjust"] is False
+        assert df.attrs["price_adjustment"] == "raw"
 
     def test_search_accepts_massive_spellings(self, monkeypatch):
         adapter = MassiveAdapter(api_key="test-key")
@@ -1478,6 +1484,48 @@ class TestFetchOhlcvEdges:
             "otc": None,
         }
 
+    def test_equity_daily_bar_is_kept_at_the_session_close(self, monkeypatch):
+        """A daily bar closes at 16:00 Eastern, not at the next UTC midnight."""
+        adapter = MassiveAdapter(api_key="test-key")
+        open_ms = int(datetime(2024, 1, 2, 14, 30, tzinfo=UTC).timestamp() * 1000)
+        monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: [self._old_bar(open_ms)])
+        df = adapter.fetch_ohlcv(
+            "AAPL",
+            "1d",
+            datetime(2024, 1, 2, 14, 30, tzinfo=UTC),
+            datetime(2024, 1, 2, 21, 0, tzinfo=UTC),
+        )
+        assert len(df) == 1
+        assert df.loc[0, "is_closed"]
+
+    def test_daily_calendar_date_bar_moves_to_the_session_open(self, monkeypatch):
+        adapter = MassiveAdapter(api_key="test-key")
+        # 05:00 UTC is midnight Eastern, the way daily aggregates are keyed.
+        open_ms = int(datetime(2024, 1, 2, 5, 0, tzinfo=UTC).timestamp() * 1000)
+        monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: [self._old_bar(open_ms)])
+        df = adapter.fetch_ohlcv(
+            "AAPL",
+            "1d",
+            datetime(2024, 1, 2, tzinfo=UTC),
+            datetime(2024, 1, 3, tzinfo=UTC),
+        )
+        assert len(df) == 1
+        assert df.loc[0, "timestamp"] == datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+
+    def test_forex_daily_bar_moves_to_the_new_york_rollover(self, monkeypatch):
+        adapter = MassiveAdapter(api_key="test-key")
+        open_ms = int(datetime(2024, 1, 3, tzinfo=UTC).timestamp() * 1000)
+        monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: [self._old_bar(open_ms)])
+        df = adapter.fetch_ohlcv(
+            "C:EURUSD",
+            "1d",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 5, tzinfo=UTC),
+        )
+        assert len(df) == 1
+        # The 17:00 New York session open is 22:00 UTC in January.
+        assert df.loc[0, "timestamp"] == datetime(2024, 1, 2, 22, 0, tzinfo=UTC)
+
     def test_empty_raises(self, monkeypatch):
         adapter = MassiveAdapter(api_key="test-key")
         monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: [])
@@ -1490,13 +1538,16 @@ class TestFetchOhlcvEdges:
 
     def test_include_live_keeps_forming_bar(self, monkeypatch):
         adapter = MassiveAdapter(api_key="test-key")
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
-        raw = [{"t": now_ms, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 5.0}]
+        bar_open = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+        bar_open_ms = int(bar_open.timestamp() * 1000)
+        raw = [{"t": bar_open_ms, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 5.0}]
         monkeypatch.setattr(adapter._rest, "aggs", lambda *a, **k: raw)
         from datakodo.core.exceptions import DataNotAvailableError
 
-        start = datetime.now(UTC) - timedelta(hours=1)
-        end = datetime.now(UTC)
+        # The request ends after the bar closes, but the bar is still forming
+        # on the wall clock, so only include_live may keep it.
+        start = bar_open - timedelta(hours=2)
+        end = bar_open + timedelta(hours=2)
         with pytest.raises(DataNotAvailableError):
             adapter.fetch_ohlcv("AAPL", "1h", start, end)
         df = adapter.fetch_ohlcv("AAPL", "1h", start, end, include_live=True)
@@ -1640,10 +1691,10 @@ class TestSearchInstrumentsEdges:
 
         orig = _mod.map_instrument
 
-        def _flaky(symbol, ticker, market=None):
+        def _flaky(symbol, ticker, market=None, **kwargs):
             if symbol == "SAP":
                 raise RuntimeError("boom")
-            return orig(symbol, ticker, market=market)
+            return orig(symbol, ticker, market=market, **kwargs)
 
         monkeypatch.setattr(_mod, "map_instrument", _flaky)
         adapter = MassiveAdapter(api_key="test-key")
@@ -1890,6 +1941,29 @@ class TestMapInstrumentExtras:
         assert inst.instrument_type == InstrumentType.SPOT
         assert inst.currency == "USD"
         assert inst.exchange == "Massive"
+
+    def test_metadata_by_market(self):
+        stock = map_instrument(
+            "AAPL",
+            {"ticker": "AAPL", "market": "stocks", "currency_name": "usd"},
+            data_tier="free",
+        )
+        assert stock.volume_type is VolumeType.SHARES
+        assert stock.session_profile is XNYS_REGULAR
+        assert stock.calendar == "XNYS"
+        assert stock.data_tier == "free"
+
+        crypto = map_instrument(
+            "X:BTCUSD", {"ticker": "X:BTCUSD", "market": "crypto", "currency_name": "usd"}
+        )
+        assert crypto.volume_type is VolumeType.BASE
+        assert crypto.calendar == "CRYPTO_UTC"
+
+        forex = map_instrument(
+            "C:EURUSD", {"ticker": "C:EURUSD", "market": "forex", "currency_name": "usd"}
+        )
+        assert forex.volume_type is VolumeType.NONE
+        assert forex.session_profile is FX_NY17
 
 
 # --- WS gaps --------------------------------------------------------------------

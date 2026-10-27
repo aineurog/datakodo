@@ -29,7 +29,7 @@ Symbols: `AAPL` (stocks), `X:BTCUSD` (crypto), `C:EURUSD` (forex),
 
 | Capability | Supported | Notes |
 |---|---|---|
-| `fetch_ohlcv` | ✅ | All 9 canonical timeframes native; `columns="basic"/"all"/[...]`; `adjust` for equities; `is_closed` derived; UTC bar-open anchor |
+| `fetch_ohlcv` | ✅ | All 12 canonical timeframes native; `columns="basic"/"all"/[...]`; `adjust` for equities; `is_closed` derived from the session close; bar-open anchor (daily and larger moved to the session open) |
 | `fetch_ticks` (historical) | ✅ | REST `list_trades` → canonical `Trade`; often paid-tier gated → honest `PaidTierRequiredError` |
 | `stream_trades` | ✅ | Async generator; `T` channel for stocks/options, `XT` for crypto; forex/indices raise `NotSupportedError` (no provider trades feed) |
 | `fetch_orderbook_snapshot` / `stream_orderbook` | ❌ | Provider offers no historical L2; `NotSupportedError` by design |
@@ -39,8 +39,15 @@ Symbols: `AAPL` (stocks), `X:BTCUSD` (crypto), `C:EURUSD` (forex),
 
 ## Timeframes
 
-`1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo` → Massive `(multiplier, timespan)`.
-Unknown timeframe → `InvalidTimeframeError`.
+`1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w, 1mo` → Massive
+`(multiplier, timespan)`. Unknown timeframe → `InvalidTimeframeError`.
+
+Bar timestamps are opens in UTC. Stocks, indices, and options use the XNYS
+session, so a daily bar closes at 16:00 Eastern rather than the next UTC
+midnight and calendar-date labels are moved to the session open. Forex uses
+the 17:00 New York rollover with its 17:00 to 18:00 maintenance break, and
+crypto uses the 24/7 calendar. Holidays and half days come from
+`exchange_calendars` when the `calendar` extra is installed.
 
 ## Tick-to-tick (historical + streaming)
 
@@ -73,6 +80,10 @@ Crypto closed bars are effectively never revised; equities/futures are
 restated (corrections, corporate actions). No local cache is kept — every
 fetch returns the provider's latest truth. `adjust=True` (default) requests
 split/dividend-adjusted equity bars.
+
+The frame records the data semantics in `.attrs`: `volume_type` (`"shares"`,
+`"base"`, or `"none"` by market), `price_adjustment` (`"raw"` or
+`"split_and_dividend"`), and `data_tier` (the configured plan, e.g. `"free"`).
 
 ## Output format
 

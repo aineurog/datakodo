@@ -3,7 +3,7 @@
 import asyncio
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import entry_points
 from types import SimpleNamespace
 
@@ -23,7 +23,7 @@ from datakodo.adapters.alpaca.mapper import map_instrument
 from datakodo.adapters.alpaca.rest import AlpacaREST, alpaca_resolution
 from datakodo.adapters.alpaca.ws import AlpacaWS
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe, VolumeType
 from datakodo.core.exceptions import (
     AuthenticationError,
     ConnectionError,
@@ -437,7 +437,7 @@ class TestAlpacaFetchOHLCV:
     def test_basic_mapping(self, monkeypatch):
         adapter = self._adapter_with_bars(
             monkeypatch,
-            [_bar("2024-01-02T14:30:00Z"), _bar("2024-01-02T15:30:00Z", c=101.5)],
+            [_bar("2024-01-02T14:30:00Z"), _bar("2024-01-02T15:30:00Z", h=102.0, c=101.5)],
         )
         df = adapter.fetch_ohlcv(
             "AAPL", "1h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
@@ -456,6 +456,10 @@ class TestAlpacaFetchOHLCV:
         assert df.iloc[0]["open"] == 100.0
         assert df.iloc[-1]["close"] == 101.5
         assert str(df["timestamp"].dt.tz) == "UTC"
+        # The feed tier, adjustment basis, and volume meaning travel with the frame.
+        assert df.attrs["volume_type"] == VolumeType.SHARES.value
+        assert df.attrs["data_tier"] == "iex"
+        assert df.attrs["price_adjustment"] == "raw"
 
     def test_columns_all_and_list(self, monkeypatch):
         rows = [_bar("2024-01-02T14:30:00Z")]
@@ -478,19 +482,40 @@ class TestAlpacaFetchOHLCV:
         with pytest.raises(ValueError, match="not available"):
             adapter.fetch_ohlcv("AAPL", "1h", start, end, columns=["quote_volume"])
 
+    def test_daily_bar_moves_from_calendar_date_to_session_open(self, monkeypatch):
+        """Alpaca labels daily bars by calendar date; the adapter anchors them
+        at the session open so the fetch contract sees the real period (sec 10)."""
+        adapter = self._adapter_with_bars(monkeypatch, [_bar("2024-01-02T05:00:00Z")])
+        df = adapter.fetch_ohlcv(
+            "AAPL", "1d", datetime(2024, 1, 2, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        )
+        assert len(df) == 1
+        assert df.loc[0, "timestamp"] == datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+        assert df.loc[0, "is_closed"]
+
     def test_crypto_has_no_session(self, monkeypatch):
         adapter = self._adapter_with_bars(monkeypatch, [_bar("2024-01-02T14:30:00Z")])
         start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
         df = adapter.fetch_ohlcv("BTC/USD", "1h", start, end, columns="all")
         assert "session" not in df.columns
+        assert df.attrs["volume_type"] == VolumeType.BASE.value
         with pytest.raises(ValueError, match="not available"):
             adapter.fetch_ohlcv("BTC/USD", "1h", start, end, columns=["session"])
 
+    def test_adjustment_is_recorded_on_the_frame(self, monkeypatch):
+        adapter = self._adapter_with_bars(monkeypatch, [_bar("2024-01-02T14:30:00Z")])
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 3, tzinfo=UTC)
+        raw = adapter.fetch_ohlcv("AAPL", "1h", start, end)
+        assert raw.attrs["price_adjustment"] == "raw"
+        adjusted = adapter.fetch_ohlcv("AAPL", "1h", start, end, adjustment="all")
+        assert adjusted.attrs["price_adjustment"] == "split_and_dividend"
+
     def test_include_live_filters_forming_bar(self, monkeypatch):
-        forming = datetime.now(UTC).replace(second=0, microsecond=0).isoformat()
-        rows = [_bar("2024-01-02T14:30:00Z"), _bar(forming)]
+        forming_dt = datetime.now(UTC).replace(second=0, microsecond=0)
+        rows = [_bar("2024-01-02T14:30:00Z"), _bar(forming_dt.isoformat())]
         adapter = self._adapter_with_bars(monkeypatch, rows)
-        start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime.now(UTC)
+        # End past the forming bar's close so the request window contains it.
+        start, end = datetime(2024, 1, 1, tzinfo=UTC), forming_dt + timedelta(hours=1)
         assert len(adapter.fetch_ohlcv("AAPL", "1h", start, end)) == 1
         df_live = adapter.fetch_ohlcv("AAPL", "1h", start, end, include_live=True)
         assert len(df_live) == 2
@@ -520,7 +545,7 @@ class TestAlpacaFetchOHLCV:
 
         def _fake_get_bars(self, symbol, timeframe, start, end, **kwargs):
             seen["start"], seen["end"] = start, end
-            return [_bar("2024-01-02T14:30:00Z")]
+            return [_bar((end - timedelta(hours=2)).isoformat())]
 
         monkeypatch.setattr(AlpacaREST, "get_bars", _fake_get_bars)
         AlpacaAdapter(api_key="k", api_secret="s").fetch_ohlcv("AAPL", "1h")
@@ -553,6 +578,21 @@ class TestAlpacaSearch:
             "MSFT", _asset("MSFT", AlpacaAssetClass.US_EQUITY, exchange=AssetExchange.NYSE)
         )
         assert inst.exchange == "NYSE"
+
+    def test_map_instrument_metadata(self):
+        equity = map_instrument("AAPL", _asset("AAPL", AlpacaAssetClass.US_EQUITY), data_tier="iex")
+        assert equity.volume_type is VolumeType.SHARES
+        assert equity.calendar == "XNYS"
+        assert equity.data_tier == "iex"
+
+        crypto = map_instrument(
+            "BTC/USD", _asset("BTC/USD", AlpacaAssetClass.CRYPTO, exchange="CRYPTO")
+        )
+        assert crypto.volume_type is VolumeType.BASE
+        assert crypto.calendar == "CRYPTO_UTC"
+
+        option = map_instrument("X", _asset("X", AlpacaAssetClass.US_OPTION))
+        assert option.volume_type is VolumeType.CONTRACTS
 
     def _adapter_with_assets(self, monkeypatch, assets):
         adapter = AlpacaAdapter(api_key="k", api_secret="s")
@@ -616,18 +656,25 @@ class _RestrictedAlpaca(AlpacaAdapter):
 
 
 def test_fetch_ohlcv_resamples_non_native_timeframe(monkeypatch):
-    """4h requested, only 1h native -> fetch 1h bars and resample to one 4h bar."""
+    """4h requested, only 1h native -> fetch 1h bars and resample one 4h bar.
+
+    The bars sit inside the 09:30 to 16:00 Eastern session, so the bucket is
+    anchored at the session open (14:30 UTC) rather than at UTC midnight.
+    """
     adapter = _RestrictedAlpaca(api_key="k", api_secret="s")
     rows = [
-        _bar("2024-01-01T00:00:00Z", o=100.0, h=110.0, lo=90.0, c=105.0, v=1000.0),
-        _bar("2024-01-01T01:00:00Z", o=105.0, h=120.0, lo=100.0, c=115.0, v=2000.0),
-        _bar("2024-01-01T02:00:00Z", o=115.0, h=130.0, lo=110.0, c=125.0, v=3000.0),
-        _bar("2024-01-01T03:00:00Z", o=125.0, h=140.0, lo=120.0, c=135.0, v=4000.0),
+        _bar("2024-01-02T14:30:00Z", o=100.0, h=110.0, lo=90.0, c=105.0, v=1000.0),
+        _bar("2024-01-02T15:30:00Z", o=105.0, h=120.0, lo=100.0, c=115.0, v=2000.0),
+        _bar("2024-01-02T16:30:00Z", o=115.0, h=130.0, lo=110.0, c=125.0, v=3000.0),
+        _bar("2024-01-02T17:30:00Z", o=125.0, h=140.0, lo=120.0, c=135.0, v=4000.0),
     ]
     monkeypatch.setattr(AlpacaREST, "get_bars", lambda self, *a, **k: rows)
 
     df = adapter.fetch_ohlcv(
-        "AAPL", "4h", datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 2, tzinfo=UTC)
+        "AAPL",
+        "4h",
+        datetime(2024, 1, 2, 14, 30, tzinfo=UTC),
+        datetime(2024, 1, 2, 21, 0, tzinfo=UTC),
     )
     assert len(df) == 1
     assert df.loc[0, "open"] == 100.0

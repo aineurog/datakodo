@@ -36,7 +36,10 @@ class Timeframe(StrEnum):
     M15 = "15m"
     M30 = "30m"
     H1 = "1h"
+    H2 = "2h"
     H4 = "4h"
+    H8 = "8h"
+    H12 = "12h"
     D1 = "1d"
     W1 = "1w"
     MN1 = "1mo"
@@ -53,3 +56,38 @@ class Session(StrEnum):
     PRE_MARKET = "pre_market"
     REGULAR = "regular"
     POST_MARKET = "post_market"
+
+
+class VolumeType(StrEnum):
+    """What the canonical OHLCV ``volume`` column counts.
+
+    ``BASE`` is base-asset volume (crypto spot), ``QUOTE`` is quote-currency
+    volume, ``SHARES`` is share count (equities), ``CONTRACTS`` is contract
+    count (futures), ``TICK`` is a price-change tick count (MT5 forex), and
+    ``NONE`` means the provider reports no usable volume.
+    """
+
+    BASE = "base"
+    QUOTE = "quote"
+    SHARES = "shares"
+    CONTRACTS = "contracts"
+    TICK = "tick"
+    NONE = "none"
+
+
+class PriceAdjustment(StrEnum):
+    """How a frame's prices relate to the raw traded prices."""
+
+    RAW = "raw"
+    SPLIT = "split"
+    SPLIT_AND_DIVIDEND = "split_and_dividend"
+    UNKNOWN = "unknown"
+
+
+class RollRule(StrEnum):
+    """How a continuous futures series selects the front contract."""
+
+    CALENDAR = "calendar"
+    VOLUME = "volume"
+    OPEN_INTEREST = "open_interest"
+    NONE = "none"

@@ -8,12 +8,14 @@ import logging
 
 import pandas as pd
 
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.calendar import CME_GLOBEX, FX_NY17, METALS_NY17
+from datakodo.core.enums import AssetClass, InstrumentType, VolumeType
 from datakodo.core.exceptions import ProviderError
 from datakodo.core.instruments import (
     ForexExtension,
     FutureExtension,
     Instrument,
+    InstrumentCapabilities,
     MetalExtension,
 )
 from datakodo.core.schemas import Fundamentals
@@ -34,6 +36,12 @@ MT5_OHLCV_EXTRAS = ("spread", "real_volume")
 
 # Metal base currencies MT5 uses for precious metals (quoted in troy ounces).
 _METAL_BASES = ("XAU", "XAG", "XPT", "XPD")
+
+_MT5_CAPABILITIES = InstrumentCapabilities(
+    ohlcv=True,
+    fundamentals=True,
+    real_volume=True,
+)
 
 
 def map_ohlcv(
@@ -105,6 +113,7 @@ def map_instrument(
     futures_modes: frozenset[int] = frozenset(),
     forex_modes: frozenset[int] = frozenset((0, 5)),
     market_type: str = "",
+    volume: str = "tick_volume",
 ) -> Instrument:
     """Classify an MT5 ``SymbolInfo`` tuple into a canonical ``Instrument``.
 
@@ -122,11 +131,19 @@ def map_instrument(
     mismatch raises ``ProviderError`` so spot-vs-futures confusion surfaces
     loudly instead of returning a silently wrong descriptor.
 
+    ``volume`` selects the canonical volume baseline (``tick_volume`` or
+    ``real_volume``); it is recorded on the descriptor as ``volume_type`` so
+    a tick count is never mistaken for broker-traded size.
+
     The asset class and instrument type are distinct dimensions (design doc
     sec 4): ``CFD`` is an *instrument type*, never an asset class.
     """
     if info is None:
         raise ProviderError(f"No MT5 symbol info for {symbol!r}.")
+    if volume not in VOLUME_BASELINES:
+        raise ProviderError(
+            f"Invalid volume baseline {volume!r}; expected one of {VOLUME_BASELINES}"
+        )
 
     calc_mode = getattr(info, "trade_calc_mode", None)
     path = str(getattr(info, "path", "") or "").lower()
@@ -181,7 +198,46 @@ def map_instrument(
                 f"{symbol!r} is {instrument.instrument_type.value}, "
                 f"not {expected.value} (requested market_type={market_type!r})."
             )
-    return instrument
+    return _with_metadata(instrument, info, volume)
+
+
+def _with_metadata(instrument: Instrument, info, volume: str) -> Instrument:
+    """Attach MT5's provider-supplied sizing and session metadata.
+
+    ``volume`` names the canonical volume baseline: ``tick_volume`` is a
+    price-change tick count (``VolumeType.TICK``) while ``real_volume`` is
+    broker-traded volume (``VolumeType.CONTRACTS``). Keeping the two distinct
+    prevents a tick count from being read as real traded size (sec 18).
+    """
+    contract_size = float(getattr(info, "trade_contract_size", 0.0) or 0.0)
+    tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+    tick_value = float(getattr(info, "trade_tick_value", 0.0) or 0.0)
+    point_value = tick_value / tick_size if tick_size else contract_size
+    digits = getattr(info, "digits", None)
+
+    if instrument.asset_class is AssetClass.FOREX:
+        session_profile, calendar = FX_NY17, "FX_NY17"
+    elif instrument.asset_class is AssetClass.METAL:
+        session_profile, calendar = METALS_NY17, "METALS_NY17"
+    elif instrument.instrument_type is InstrumentType.FUTURE:
+        session_profile, calendar = CME_GLOBEX, "CME_GLOBEX"
+    else:
+        session_profile, calendar = None, ""
+
+    return instrument.model_copy(
+        update={
+            "volume_type": (VolumeType.TICK if volume == "tick_volume" else VolumeType.CONTRACTS),
+            "contract_multiplier": contract_size or 1.0,
+            "point_value": point_value,
+            "tick_size": tick_size,
+            "price_precision": int(digits) if digits is not None else None,
+            "session_profile": session_profile,
+            "calendar": calendar,
+            "data_tier": "broker",
+            "is_cfd": instrument.instrument_type is InstrumentType.CFD,
+            "capabilities": _MT5_CAPABILITIES,
+        }
+    )
 
 
 def _classify_asset(base: str, path: str) -> AssetClass:

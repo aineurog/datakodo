@@ -17,7 +17,10 @@ BINANCE_MAP: dict[Timeframe, str] = {
     Timeframe.M15: "15m",
     Timeframe.M30: "30m",
     Timeframe.H1: "1h",
+    Timeframe.H2: "2h",
     Timeframe.H4: "4h",
+    Timeframe.H8: "8h",
+    Timeframe.H12: "12h",
     Timeframe.D1: "1d",
     Timeframe.W1: "1w",
     Timeframe.MN1: "1M",
@@ -30,7 +33,10 @@ MT5_MAP: dict[Timeframe, int] = {
     Timeframe.M15: 15,  # TIMEFRAME_M15
     Timeframe.M30: 30,  # TIMEFRAME_M30
     Timeframe.H1: 16385,  # TIMEFRAME_H1
+    Timeframe.H2: 16386,  # TIMEFRAME_H2
     Timeframe.H4: 16388,  # TIMEFRAME_H4
+    Timeframe.H8: 16392,  # TIMEFRAME_H8
+    Timeframe.H12: 16396,  # TIMEFRAME_H12
     Timeframe.D1: 16408,  # TIMEFRAME_D1
     Timeframe.W1: 32769,  # TIMEFRAME_W1
     Timeframe.MN1: 49153,  # TIMEFRAME_MN1
@@ -43,7 +49,10 @@ IBKR_MAP: dict[Timeframe, str] = {
     Timeframe.M15: "15 mins",
     Timeframe.M30: "30 mins",
     Timeframe.H1: "1 hour",
+    Timeframe.H2: "2 hours",
     Timeframe.H4: "4 hours",
+    Timeframe.H8: "8 hours",
+    Timeframe.H12: "12 hours",
     Timeframe.D1: "1 day",
     Timeframe.W1: "1 week",
     Timeframe.MN1: "1 month",
@@ -56,7 +65,10 @@ MASSIVE_MAP: dict[Timeframe, tuple[int, str]] = {
     Timeframe.M15: (15, "minute"),
     Timeframe.M30: (30, "minute"),
     Timeframe.H1: (1, "hour"),
+    Timeframe.H2: (2, "hour"),
     Timeframe.H4: (4, "hour"),
+    Timeframe.H8: (8, "hour"),
+    Timeframe.H12: (12, "hour"),
     Timeframe.D1: (1, "day"),
     Timeframe.W1: (1, "week"),
     Timeframe.MN1: (1, "month"),
@@ -70,7 +82,10 @@ ALPACA_MAP: dict[Timeframe, tuple[int, str]] = {
     Timeframe.M15: (15, "Minute"),
     Timeframe.M30: (30, "Minute"),
     Timeframe.H1: (1, "Hour"),
+    Timeframe.H2: (2, "Hour"),
     Timeframe.H4: (4, "Hour"),
+    Timeframe.H8: (8, "Hour"),
+    Timeframe.H12: (12, "Hour"),
     Timeframe.D1: (1, "Day"),
     Timeframe.W1: (1, "Week"),
     Timeframe.MN1: (1, "Month"),
@@ -84,7 +99,10 @@ _TIMEFRAME_DELTA: dict[Timeframe, timedelta] = {
     Timeframe.M15: timedelta(minutes=15),
     Timeframe.M30: timedelta(minutes=30),
     Timeframe.H1: timedelta(hours=1),
+    Timeframe.H2: timedelta(hours=2),
     Timeframe.H4: timedelta(hours=4),
+    Timeframe.H8: timedelta(hours=8),
+    Timeframe.H12: timedelta(hours=12),
     Timeframe.D1: timedelta(days=1),
     Timeframe.W1: timedelta(weeks=1),
     Timeframe.MN1: timedelta(days=30),

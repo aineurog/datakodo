@@ -10,10 +10,40 @@ from typing import Any
 
 import pandas as pd
 
-from datakodo.core.enums import AssetClass, InstrumentType
-from datakodo.core.instruments import Instrument
+from datakodo.core.calendar import (
+    CME_GLOBEX,
+    CRYPTO_UTC,
+    FX_NY17,
+    XNYS_REGULAR,
+)
+from datakodo.core.enums import AssetClass, InstrumentType, VolumeType
+from datakodo.core.instruments import Instrument, InstrumentCapabilities
 from datakodo.core.schemas import Trade, resolve_ohlcv_columns
-from datakodo.core.timeframe import timeframe_delta
+from datakodo.ops.validation import bar_close_times
+
+_MASSIVE_CAPABILITIES = InstrumentCapabilities(
+    ohlcv=True,
+    ticks=True,
+    streaming_ticks=True,
+    fundamentals=True,
+    real_volume=True,
+    adjusted_prices=True,
+)
+
+_VOLUME_BY_MARKET = {
+    "stocks": VolumeType.SHARES,
+    "crypto": VolumeType.BASE,
+    "forex": VolumeType.NONE,
+    "indices": VolumeType.NONE,
+    "options": VolumeType.CONTRACTS,
+    "futures": VolumeType.CONTRACTS,
+}
+
+
+def volume_type_for(market: str) -> VolumeType:
+    """What Massive's ``volume`` field counts for ``market``."""
+    return _VOLUME_BY_MARKET.get(market.lower(), VolumeType.NONE)
+
 
 # Optional columns Massive can supply on top of the canonical base (design sec 3).
 MASSIVE_OHLCV_EXTRAS = ("session", "vwap", "trades_count")
@@ -142,7 +172,7 @@ def map_ohlcv(
     if "timestamp" not in df.columns:
         df["timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
 
-    df["is_closed"] = df["timestamp"] + timeframe_delta(timeframe) <= pd.Timestamp.now(tz="UTC")
+    df["is_closed"] = bar_close_times(df["timestamp"], timeframe) <= pd.Timestamp.now(tz="UTC")
 
     # columns="all": base + every extra the endpoint actually provided.
     if columns == "all":
@@ -157,7 +187,13 @@ def map_ohlcv(
     return df[[c for c in resolved if c in df.columns]]
 
 
-def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = None) -> Instrument:
+def map_instrument(
+    symbol: str,
+    ticker: dict[str, Any],
+    market: str | None = None,
+    *,
+    data_tier: str = "",
+) -> Instrument:
     """Classify a Massive ticker dict into a canonical ``Instrument``.
 
     Massive ticker list fields -> ``Instrument`` mapping (design doc sec 6.2):
@@ -228,6 +264,17 @@ def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = Non
     # -- currency ----------------------------------------------------------
     currency = currency_name if currency_name else "USD"
 
+    # -- data semantics ----------------------------------------------------
+    volume_type = volume_type_for(massive_market)
+    if massive_market == "crypto":
+        session_profile, calendar = CRYPTO_UTC, "CRYPTO_UTC"
+    elif massive_market == "forex":
+        session_profile, calendar = FX_NY17, "FX_NY17"
+    elif massive_market == "futures":
+        session_profile, calendar = CME_GLOBEX, "CME_GLOBEX"
+    else:
+        session_profile, calendar = XNYS_REGULAR, "XNYS"
+
     # -- build Instrument --------------------------------------------------
     inst = Instrument(
         symbol=raw_ticker,
@@ -236,6 +283,11 @@ def map_instrument(symbol: str, ticker: dict[str, Any], market: str | None = Non
         currency=currency,
         asset_class=asset_class,
         instrument_type=instrument_type,
+        volume_type=volume_type,
+        session_profile=session_profile,
+        calendar=calendar,
+        data_tier=data_tier,
+        capabilities=_MASSIVE_CAPABILITIES,
     )
 
     # typed extensions are left as None; they are filled lazily via

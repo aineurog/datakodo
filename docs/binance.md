@@ -139,7 +139,7 @@ to start fetching.
 The same canonical timeframes are used everywhere:
 
 ```text
-1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo
+1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w, 1mo
 ```
 
 ## Resampling

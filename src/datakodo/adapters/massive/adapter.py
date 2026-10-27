@@ -5,17 +5,32 @@ from datetime import datetime
 from typing import Any
 
 from datakodo.adapters.massive.config import MassiveConfig
-from datakodo.adapters.massive.mapper import map_instrument, map_ohlcv
+from datakodo.adapters.massive.mapper import (
+    map_instrument,
+    map_ohlcv,
+    volume_type_for,
+)
 from datakodo.adapters.massive.rest import MassiveREST
 from datakodo.adapters.massive.ws import MassiveWS
+from datakodo.core.calendar import (
+    FX_NY17,
+    XNYS_REGULAR,
+    SessionProfile,
+    TradingCalendar,
+    resolve_calendar,
+)
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType
+from datakodo.core.enums import AssetClass, InstrumentType, PriceAdjustment
 from datakodo.core.exceptions import DataNotAvailableError, SymbolNotFoundError
 from datakodo.core.instruments import Instrument
 from datakodo.core.interfaces import AdapterInterface, symbol_of
-from datakodo.core.schemas import Fundamentals
+from datakodo.core.schemas import (
+    Fundamentals,
+    available_ohlcv_extras,
+    resolve_ohlcv_columns,
+)
 from datakodo.ops.output import to_output_format
-from datakodo.ops.validation import validate_ohlcv
+from datakodo.ops.validation import anchor_period_bars, apply_fetch_contract
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +81,17 @@ _TYPE_TO_MASSIVE = {
 }
 
 
+def _annotate(df, market: str, data_tier: str, adjust: bool) -> None:
+    """Record Massive's volume basis and price adjustment on the frame."""
+    df.attrs.update(
+        volume_type=volume_type_for(market).value,
+        price_adjustment=(
+            PriceAdjustment.SPLIT_AND_DIVIDEND.value if adjust else PriceAdjustment.RAW.value
+        ),
+        data_tier=data_tier,
+    )
+
+
 def _massive_market_of(asset_class: Any) -> str | None:
     """Normalize an asset-class filter to a Massive ``market`` value."""
     if asset_class is None:
@@ -97,6 +123,8 @@ class MassiveAdapter(AdapterInterface):
     supports_streaming_orderbook = False
     supports_streaming_ticks = True
     supports_fundamentals = True
+    supports_real_volume = True
+    supports_adjusted_prices = True
 
     def __init__(
         self,
@@ -123,6 +151,22 @@ class MassiveAdapter(AdapterInterface):
             if upper.startswith(prefix):
                 return market
         return "stocks"
+
+    def _ohlcv_context(self, symbol: str) -> tuple[SessionProfile | None, TradingCalendar]:
+        """The session profile and calendar that define this symbol's periods.
+
+        Forex follows the 17:00 New York rollover, crypto trades around the
+        clock, and equities, indices, and options use the XNYS session. The
+        resolved calendar supplies real holidays and half days when
+        ``exchange_calendars`` is installed, and the built-in weekend calendar
+        otherwise.
+        """
+        market = self._market_of(symbol)
+        if market == "crypto":
+            return None, resolve_calendar(AssetClass.CRYPTO)
+        if market == "forex":
+            return FX_NY17, resolve_calendar(AssetClass.FOREX)
+        return XNYS_REGULAR, resolve_calendar(AssetClass.EQUITY, "XNYS")
 
     def search_instruments(
         self,
@@ -165,6 +209,7 @@ class MassiveAdapter(AdapterInterface):
                     symbol,
                     ticker,
                     market=self._market_of(symbol),
+                    data_tier=self._massive.data_tier,
                 )
             except Exception:
                 continue
@@ -333,11 +378,19 @@ class MassiveAdapter(AdapterInterface):
         start, end = resolve_date_range(start, end)
         symbol = symbol_of(symbol)
         market = self._market_of(symbol)
+        session, calendar = self._ohlcv_context(symbol)
         raw = self._rest.aggs(symbol, timeframe, start, end, adjust=adjust)
-        df = map_ohlcv(raw, timeframe, market=market, columns=columns)
-
-        if not include_live:
-            df = df.loc[df["is_closed"]].reset_index(drop=True)
+        df = map_ohlcv(raw, timeframe, market=market, columns="all")
+        df = anchor_period_bars(df, timeframe, calendar=calendar, session=session)
+        df = apply_fetch_contract(
+            df,
+            timeframe,
+            start,
+            end,
+            closed_only=not include_live,
+            calendar=calendar,
+            session=session,
+        )
 
         if df.empty:
             raise DataNotAvailableError(
@@ -345,9 +398,11 @@ class MassiveAdapter(AdapterInterface):
                 f"in [{start.isoformat()}, {end.isoformat()}]."
             )
 
-        validate_ohlcv(df)
+        _annotate(df, market, self._massive.data_tier, adjust)
+        available = available_ohlcv_extras(df.columns)
+        resolved = resolve_ohlcv_columns(columns, available)
         logger.info("Fetched %d %s OHLCV rows for %s", len(df), timeframe, symbol)
-        return to_output_format(df, output_format or self._config.output_format)
+        return to_output_format(df[resolved], output_format or self._config.output_format)
 
     def fetch_ticks(
         self,

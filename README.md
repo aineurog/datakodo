@@ -24,8 +24,20 @@ your data comes from Binance today or another provider tomorrow.
   over WebSocket.
 - **Canonical schemas.** Every provider returns data in the same shape,
   so your analysis code never depends on a specific exchange.
-- **Closed-data guarantees.** Only fully closed candles are returned, so
-  historical data stays consistent.
+- **Closed-data guarantees.** Fetches use a half-open `[start, end)` window
+  and return only fully closed candles by default, so historical data stays
+  consistent.
+- **Session-aware calendars.** Trading sessions, holidays, half days, DST,
+  and market-specific rollovers (for example forex's 17:00 New York close)
+  drive resampling and gap detection.
+- **Rich instrument metadata.** Volume semantics, contract multipliers, tick
+  sizes, price precision, expiry and roll rules, capability flags, and
+  adjustment state travel with the data.
+- **Explicit adjustments.** Split and dividend adjustment is a separate
+  pipeline step that returns cumulative price and volume factors, so raw data
+  is always reconstructible.
+- **Continuous futures.** Stitch contracts on a calendar roll schedule with
+  ratio or difference back-adjustment, recording every roll.
 - **Built-in rate limiting.** Requests are rate-limited automatically, with
   retry and exponential backoff.
 - **Flexible output.** Return data as pandas (default), polars, or Arrow.
@@ -39,6 +51,7 @@ pip install datakodo[binance]    # Binance spot + USD-M futures
 pip install datakodo[alpaca]     # Alpaca: US equities + crypto spot
 pip install datakodo[mt5]        # MetaTrader 5 terminal (Windows)
 pip install datakodo[massive]    # Massive.com (ex-Polygon.io): stocks, crypto, forex, indices, options
+pip install datakodo[calendar]   # exchange_calendars: real exchange holidays and half days
 ```
 
 ## Quick Start

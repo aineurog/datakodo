@@ -3,10 +3,38 @@
 import pandas as pd
 from alpaca.trading.enums import AssetClass as AlpacaAssetClass
 
-from datakodo.core.enums import AssetClass, InstrumentType
-from datakodo.core.instruments import Instrument
+from datakodo.core.calendar import CRYPTO_UTC, XNYS_REGULAR
+from datakodo.core.enums import (
+    AssetClass,
+    InstrumentType,
+    PriceAdjustment,
+    VolumeType,
+)
+from datakodo.core.instruments import Instrument, InstrumentCapabilities
 from datakodo.core.schemas import Trade, resolve_ohlcv_columns
-from datakodo.core.timeframe import timeframe_delta
+from datakodo.ops.validation import bar_close_times
+
+_ALPACA_CAPABILITIES = InstrumentCapabilities(
+    ohlcv=True,
+    ticks=True,
+    streaming_ticks=True,
+    real_volume=True,
+    adjusted_prices=True,
+)
+
+# Alpaca's adjustment enum -> canonical price-adjustment label.
+_ADJUSTMENT = {
+    "raw": PriceAdjustment.RAW,
+    "split": PriceAdjustment.SPLIT,
+    "dividend": PriceAdjustment.UNKNOWN,
+    "all": PriceAdjustment.SPLIT_AND_DIVIDEND,
+}
+
+
+def price_adjustment(adjustment: str) -> PriceAdjustment:
+    """Map an Alpaca ``adjustment`` value to the canonical label."""
+    return _ADJUSTMENT.get(str(adjustment).lower(), PriceAdjustment.UNKNOWN)
+
 
 _ALPACA_CLASS = {
     AlpacaAssetClass.US_EQUITY: (AssetClass.EQUITY, InstrumentType.SPOT),
@@ -69,7 +97,7 @@ def map_ohlcv(raw: list, timeframe: str, *, session: str | None = "regular", col
         df[col] = df[col].astype("float64")
     df["trades_count"] = df["trades_count"].astype("Int64")
 
-    df["is_closed"] = df["timestamp"] + timeframe_delta(timeframe) <= pd.Timestamp.now(tz="UTC")
+    df["is_closed"] = bar_close_times(df["timestamp"], timeframe) <= pd.Timestamp.now(tz="UTC")
 
     if columns == "all":
         extras = [c for c in df.columns if c not in base]
@@ -78,18 +106,38 @@ def map_ohlcv(raw: list, timeframe: str, *, session: str | None = "regular", col
     return df[resolve_ohlcv_columns(columns, available)]
 
 
-def map_instrument(symbol: str, asset) -> Instrument:
-    """SDK Asset → canonical Instrument (class × type never conflated)."""
+def map_instrument(symbol: str, asset, *, data_tier: str = "") -> Instrument:
+    """SDK Asset → canonical Instrument (class × type never conflated).
+
+    ``data_tier`` names the market-data feed the client is entitled to
+    (``iex`` on the free tier, ``sip`` with a paid plan). Alpaca's security
+    master is tier independent, so the adapter passes its configured feed.
+    """
     asset_class, instrument_type = _ALPACA_CLASS.get(
         asset.asset_class, (AssetClass.EQUITY, InstrumentType.SPOT)
     )
+    crypto = asset_class is AssetClass.CRYPTO
+    if crypto:
+        volume_type = VolumeType.BASE
+        session_profile, calendar = CRYPTO_UTC, "CRYPTO_UTC"
+    else:
+        volume_type = VolumeType.SHARES
+        session_profile, calendar = XNYS_REGULAR, "XNYS"
+    if instrument_type is InstrumentType.OPTION:
+        volume_type = VolumeType.CONTRACTS
+    exchange = getattr(asset.exchange, "value", asset.exchange) or "Alpaca"
     return Instrument(
         symbol=symbol,
         provider_symbol=symbol,
-        exchange=getattr(asset.exchange, "value", asset.exchange) or "Alpaca",
+        exchange=exchange,
         currency="USD",
         asset_class=asset_class,
         instrument_type=instrument_type,
+        volume_type=volume_type,
+        session_profile=session_profile,
+        calendar=calendar,
+        data_tier=data_tier,
+        capabilities=_ALPACA_CAPABILITIES,
     )
 
 

@@ -15,9 +15,14 @@ from datakodo.adapters.mt5.mapper import (
 )
 from datakodo.adapters.mt5.rest import MT5REST
 from datakodo.adapters.mt5.terminal import MT5Terminal
-from datakodo.core.calendar import WeekendClosedCalendar
+from datakodo.core.calendar import (
+    SessionProfile,
+    TradingCalendar,
+    WeekendClosedCalendar,
+    resolve_calendar,
+)
 from datakodo.core.config import Config
-from datakodo.core.enums import Timeframe
+from datakodo.core.enums import PriceAdjustment, Timeframe, VolumeType
 from datakodo.core.exceptions import (
     DataNotAvailableError,
     InvalidTimeframeError,
@@ -31,11 +36,16 @@ from datakodo.core.schemas import (
     available_ohlcv_extras,
     resolve_ohlcv_columns,
 )
-from datakodo.core.timeframe import MT5_MAP
+from datakodo.core.timeframe import MT5_MAP, timeframe_delta
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
 from datakodo.ops.resample import pick_source_timeframe, resample
-from datakodo.ops.validation import add_is_closed, detect_gaps, validate_ohlcv
+from datakodo.ops.validation import (
+    anchor_period_bars,
+    apply_fetch_contract,
+    detect_gaps,
+    validate_ohlcv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +71,8 @@ class MT5Adapter(AdapterInterface):
     supports_streaming_orderbook = False
     supports_streaming_ticks = False
     supports_fundamentals = True
+    supports_real_volume = True
+    supports_adjusted_prices = False
 
     concurrency_model = "serial"
 
@@ -203,6 +215,7 @@ class MT5Adapter(AdapterInterface):
         *,
         columns: str | Sequence[str] = "basic",
         include_live: bool = False,
+        volume: str = "tick_volume",
         output_format: str | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -213,6 +226,12 @@ class MT5Adapter(AdapterInterface):
         (``spread`` and ``real_volume``); a list requests specific optional
         columns. MT5 has no session-based asset class, so ``session`` is never
         produced.
+
+        ``volume`` selects what the canonical ``volume`` column means:
+        ``"tick_volume"`` (default, reliable for forex/CFDs) counts
+        price-change ticks, while ``"real_volume"`` carries broker-traded
+        volume. The distinction is recorded on the returned frame's
+        ``attrs["volume_type"]``.
 
         By default only fully **closed** bars are returned (design doc sec 18);
         set ``include_live=True`` to keep the still-forming bar, marked
@@ -250,6 +269,7 @@ class MT5Adapter(AdapterInterface):
             start.isoformat(),
             end.isoformat(),
         )
+        allow_negative = isinstance(symbol, Instrument) and symbol.allow_negative_prices
         symbol = symbol_of(symbol)
         mt5_tf = _to_mt5_timeframe(timeframe)
         tf = Timeframe(timeframe)
@@ -259,6 +279,7 @@ class MT5Adapter(AdapterInterface):
         # symbol fails the select -> SymbolNotFoundError.
         symbol = self._rest.ensure_symbol_known(symbol)
         offset_seconds = self._rest.server_offset_seconds(symbol)
+        session, calendar = self._period_context(symbol)
 
         if start >= end:
             raise DataNotAvailableError(self._no_bars_message(symbol, timeframe, start, end))
@@ -272,6 +293,10 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=include_live,
+                volume=volume,
+                allow_negative_prices=allow_negative,
+                calendar=calendar,
+                session=session,
             )
         else:
             source_tf = pick_source_timeframe(tf, self.native_timeframes)
@@ -284,10 +309,23 @@ class MT5Adapter(AdapterInterface):
                 end,
                 offset_seconds=offset_seconds,
                 include_live=False,
+                volume=volume,
+                allow_negative_prices=allow_negative,
+                calendar=calendar,
+                session=session,
             )
-            df = resample(source, tf, calendar=self._calendar())
-            validate_ohlcv(df)
-            self._log_gaps(symbol, timeframe, start, end, df)
+            df = resample(
+                source,
+                tf,
+                source_timeframe=source_tf,
+                session=session,
+                calendar=calendar,
+                start=start,
+                end=end,
+                incomplete="drop",
+            )
+            validate_ohlcv(df, allow_negative_prices=allow_negative)
+            self._log_gaps(symbol, timeframe, start, end, df, calendar=calendar)
             available = ()
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s",
@@ -297,6 +335,7 @@ class MT5Adapter(AdapterInterface):
                 symbol,
             )
 
+        _annotate(df, volume)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
 
@@ -310,6 +349,10 @@ class MT5Adapter(AdapterInterface):
         *,
         offset_seconds: int,
         include_live: bool,
+        volume: str = "tick_volume",
+        allow_negative_prices: bool = False,
+        calendar: TradingCalendar | None = None,
+        session: SessionProfile | None = None,
     ) -> tuple[Any, tuple[str, ...]]:
         """Fetch ``timeframe`` bars the terminal offers natively.
 
@@ -330,7 +373,12 @@ class MT5Adapter(AdapterInterface):
                 chunk_end,
                 offset_seconds=offset_seconds,
             )
-            return map_ohlcv(raw, offset_seconds=offset_seconds, extras=MT5_OHLCV_EXTRAS)
+            return map_ohlcv(
+                raw,
+                volume=volume,
+                offset_seconds=offset_seconds,
+                extras=MT5_OHLCV_EXTRAS,
+            )
 
         # Bar-closed decisions use the server clock (latest tick), never the
         # PC clock, so a drifted PC can neither drop real closed bars nor
@@ -348,10 +396,21 @@ class MT5Adapter(AdapterInterface):
             )
             if frame.empty:
                 return frame
-            frame = add_is_closed(frame, timeframe, now=server_now)
-            if not include_live:
-                frame = frame.loc[frame["is_closed"]].reset_index(drop=True)
-            return frame
+            # Daily and larger MT5 bars are server-midnight labelled; move
+            # them to the session open before the contract decides closure
+            # (design sec 10).
+            frame = anchor_period_bars(frame, timeframe, calendar=calendar, session=session)
+            return apply_fetch_contract(
+                frame,
+                timeframe,
+                window_start,
+                window_end,
+                now=server_now,
+                closed_only=not include_live,
+                allow_negative_prices=allow_negative_prices,
+                calendar=calendar,
+                session=session,
+            )
 
         df = _fetch_window(start, end)
         coverage = "full"
@@ -373,7 +432,9 @@ class MT5Adapter(AdapterInterface):
                     end.isoformat(),
                 )
                 overlap_start = max(start, oldest)
-                overlap_end = min(end, newest)
+                # The probe reports the newest bar's OPEN time; the half-open
+                # contract needs the end of that bar to keep it.
+                overlap_end = min(end, newest + timeframe_delta(timeframe))
                 if overlap_start < overlap_end:
                     logger.info(
                         "MT5 fetching overlap [%s → %s] for %s (partial coverage)",
@@ -401,8 +462,7 @@ class MT5Adapter(AdapterInterface):
                 self._no_bars_message(symbol, timeframe, start, end, available=available)
             )
 
-        validate_ohlcv(df)
-        self._log_gaps(symbol, timeframe, start, end, df)
+        self._log_gaps(symbol, timeframe, start, end, df, calendar=calendar)
         first_ts = df["timestamp"].iloc[0]
         last_ts = df["timestamp"].iloc[-1]
         logger.info(
@@ -420,10 +480,17 @@ class MT5Adapter(AdapterInterface):
         return df, available_ohlcv_extras(df.columns)
 
     def _log_gaps(
-        self, symbol: str, timeframe: str, start: datetime, end: datetime, df: Any
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+        df: Any,
+        *,
+        calendar: TradingCalendar | None = None,
     ) -> None:
         """Warn when the fetched frame has missing candles (design doc sec 18)."""
-        gaps = detect_gaps(df, timeframe, calendar=self._calendar())
+        gaps = detect_gaps(df, timeframe, calendar=calendar)
         if not gaps.empty:
             missing = int(gaps["gap_missing"].sum())
             logger.warning(
@@ -498,16 +565,42 @@ class MT5Adapter(AdapterInterface):
         )
         return message
 
-    def _calendar(self) -> WeekendClosedCalendar:
-        """The trading calendar for this adapter's universe (design doc sec 9).
+    def _period_context(self, symbol: str) -> tuple[SessionProfile | None, TradingCalendar]:
+        """The session profile and calendar that define ``symbol``'s periods.
 
-        MT5 is a weekend-closed venue: forex, metals, index and equity CFDs,
-        and exchange-traded futures all halt over the weekend. The calendar
-        suppresses those scheduled closures during gap detection. No MT5
-        instrument carries an intraday ``session`` label today, so the
-        ``session`` column is never produced.
+        MT5 symbols are self-describing, so the same classification used by
+        ``instrument()`` selects the period model: forex and metals use the
+        17:00 New York rollover with its maintenance break, futures use the
+        CME Globex session, and crypto is always open. Equities and index
+        CFDs fall back to the weekend calendar (or an installed
+        ``exchange_calendars`` venue) because their intraday hours are not
+        advertised by the terminal. The session profile drives resampling and
+        gap detection; the calendar supplies holidays and half days.
         """
-        return WeekendClosedCalendar()
+        info = self._rest.symbol_info(symbol)
+        if info is None:
+            return None, WeekendClosedCalendar()
+        instrument = map_instrument(
+            symbol,
+            info,
+            futures_modes=self._rest.futures_calc_modes(),
+            forex_modes=self._rest.forex_calc_modes(),
+        )
+        calendar = resolve_calendar(
+            instrument.asset_class,
+            instrument.exchange,
+            instrument.instrument_type.value,
+        )
+        return instrument.session_profile, calendar
+
+
+def _annotate(df, volume: str) -> None:
+    """Record MT5's volume semantics on the returned frame (sec 18)."""
+    df.attrs.update(
+        volume_type=(VolumeType.TICK if volume == "tick_volume" else VolumeType.CONTRACTS).value,
+        price_adjustment=PriceAdjustment.RAW.value,
+        data_tier="broker",
+    )
 
 
 def _to_mt5_timeframe(timeframe: str) -> int:

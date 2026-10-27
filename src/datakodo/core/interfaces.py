@@ -44,6 +44,12 @@ class AdapterInterface(ABC):
     supports_streaming_orderbook: bool = False
     supports_streaming_ticks: bool = False
     supports_fundamentals: bool = False
+    supports_real_volume: bool = False
+    """True when the canonical ``volume`` column can carry real traded size
+    rather than a tick count or share-equivalent proxy."""
+    supports_adjusted_prices: bool = False
+    """True when the provider offers split/dividend-adjusted as well as raw
+    prices (design doc sec 18)."""
     requires_paid_tier: bool = False
 
     concurrency_model: str = "thread"

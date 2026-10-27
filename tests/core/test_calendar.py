@@ -1,10 +1,14 @@
 """Trading calendar tests (design doc sec 9)."""
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
+
+import pytest
 
 from datakodo.core.calendar import (
     AlwaysOpenCalendar,
     ExchangeCalendar,
+    SessionCalendar,
+    SessionProfile,
     SessionWindow,
     WeekendClosedCalendar,
     resolve_calendar,
@@ -117,14 +121,185 @@ class TestExchangeCalendar:
         )
 
 
+class TestSessionProfile:
+    def test_same_day_window(self):
+        profile = SessionProfile(timezone="UTC", open=time(9), close=time(17))
+        windows = profile.windows(date(2024, 1, 8))
+        assert windows == [
+            (
+                datetime(2024, 1, 8, 9, 0, tzinfo=UTC),
+                datetime(2024, 1, 8, 17, 0, tzinfo=UTC),
+            )
+        ]
+
+    def test_previous_day_window_converts_timezone(self):
+        profile = SessionProfile(
+            timezone="America/New_York",
+            open=time(17),
+            close=time(17),
+            starts_previous_day=True,
+        )
+        # January is EST (UTC-5): Sunday 17:00 -> Monday 17:00.
+        assert profile.windows(date(2024, 1, 8)) == [
+            (
+                datetime(2024, 1, 7, 22, 0, tzinfo=UTC),
+                datetime(2024, 1, 8, 22, 0, tzinfo=UTC),
+            )
+        ]
+
+    def test_previous_day_window_follows_dst(self):
+        profile = SessionProfile(
+            timezone="America/New_York",
+            open=time(17),
+            close=time(17),
+            starts_previous_day=True,
+        )
+        # DST started on 2024-03-10, so the session is an hour earlier in UTC.
+        assert profile.windows(date(2024, 3, 11)) == [
+            (
+                datetime(2024, 3, 10, 21, 0, tzinfo=UTC),
+                datetime(2024, 3, 11, 21, 0, tzinfo=UTC),
+            )
+        ]
+
+    def test_early_close_shortens_window(self):
+        profile = SessionProfile(timezone="America/New_York", open=time(9, 30), close=time(16))
+        assert profile.windows(date(2024, 1, 8), early_close=time(13)) == [
+            (
+                datetime(2024, 1, 8, 14, 30, tzinfo=UTC),
+                datetime(2024, 1, 8, 18, 0, tzinfo=UTC),
+            )
+        ]
+
+    def test_early_close_cannot_extend_window(self):
+        profile = SessionProfile(timezone="UTC", open=time(9), close=time(17))
+        assert profile.windows(date(2024, 1, 8), early_close=time(20)) == [
+            (
+                datetime(2024, 1, 8, 9, 0, tzinfo=UTC),
+                datetime(2024, 1, 8, 17, 0, tzinfo=UTC),
+            )
+        ]
+
+    def test_break_splits_window(self):
+        profile = SessionProfile(
+            timezone="UTC",
+            open=time(0),
+            close=time(0),
+            starts_previous_day=True,
+            breaks=((time(5), time(6)),),
+        )
+        assert profile.windows(date(2024, 1, 8)) == [
+            (
+                datetime(2024, 1, 7, 0, 0, tzinfo=UTC),
+                datetime(2024, 1, 7, 5, 0, tzinfo=UTC),
+            ),
+            (
+                datetime(2024, 1, 7, 6, 0, tzinfo=UTC),
+                datetime(2024, 1, 8, 0, 0, tzinfo=UTC),
+            ),
+        ]
+
+    def test_weekdays_are_normalized(self):
+        profile = SessionProfile(timezone="UTC", open=time(9), close=time(17), weekdays={0, 2, 4})
+        assert profile.weekdays == frozenset({0, 2, 4})
+
+    def test_session_label_is_normalized(self):
+        profile = SessionProfile(timezone="UTC", open=time(9), close=time(17), session="regular")
+        assert profile.session is Session.REGULAR
+
+    def test_unknown_timezone_raises(self):
+        with pytest.raises(ValueError, match="Unknown timezone"):
+            SessionProfile(timezone="Mars/Olympus", open=time(9), close=time(17))
+
+    def test_empty_weekdays_raises(self):
+        with pytest.raises(ValueError, match="weekdays"):
+            SessionProfile(timezone="UTC", open=time(9), close=time(17), weekdays=set())
+
+    def test_invalid_weekday_raises(self):
+        with pytest.raises(ValueError, match="weekdays"):
+            SessionProfile(timezone="UTC", open=time(9), close=time(17), weekdays={7})
+
+    def test_same_day_requires_open_before_close(self):
+        with pytest.raises(ValueError, match="open < close"):
+            SessionProfile(timezone="UTC", open=time(17), close=time(9))
+
+    def test_previous_day_rejects_close_after_open(self):
+        with pytest.raises(ValueError, match="close <= open"):
+            SessionProfile(
+                timezone="UTC",
+                open=time(9),
+                close=time(17),
+                starts_previous_day=True,
+            )
+
+    def test_break_must_be_ordered(self):
+        with pytest.raises(ValueError, match="breaks"):
+            SessionProfile(
+                timezone="UTC",
+                open=time(9),
+                close=time(17),
+                breaks=((time(12), time(11)),),
+            )
+
+
+class TestEarlyClose:
+    def test_default_calendars_have_no_early_close(self):
+        assert AlwaysOpenCalendar().early_close(date(2024, 1, 8)) is None
+        assert WeekendClosedCalendar().early_close(date(2024, 1, 8)) is None
+
+    def test_exchange_calendar_override(self):
+        calendar = ExchangeCalendar(
+            "America/New_York",
+            {
+                weekday: (SessionWindow(Session.REGULAR, time(9, 30), time(16)),)
+                for weekday in range(5)
+            },
+            early_closes={date(2024, 11, 29): time(13)},
+        )
+        assert calendar.early_close(date(2024, 11, 29)) == time(13)
+        assert calendar.early_close(datetime(2024, 11, 29, 15, tzinfo=UTC)) == time(13)
+        assert calendar.early_close(date(2024, 11, 28)) is None
+
+    def test_half_day_shortens_windows_and_expected_bars(self):
+        calendar = ExchangeCalendar(
+            "America/New_York",
+            {
+                weekday: (SessionWindow(Session.REGULAR, time(9, 30), time(16)),)
+                for weekday in range(5)
+            },
+            early_closes={date(2024, 11, 29): time(13)},
+        )
+        # 09:30-13:00 Eastern is 14:30-18:00 UTC (EST, UTC-5).
+        windows = calendar.session_windows_between(
+            datetime(2024, 11, 29, tzinfo=UTC),
+            datetime(2024, 11, 30, tzinfo=UTC),
+        )
+        assert windows == [
+            (
+                datetime(2024, 11, 29, 14, 30, tzinfo=UTC),
+                datetime(2024, 11, 29, 18, 0, tzinfo=UTC),
+            )
+        ]
+        assert (
+            calendar.expected_bars(
+                datetime(2024, 11, 29, tzinfo=UTC),
+                datetime(2024, 11, 30, tzinfo=UTC),
+                timedelta(minutes=15),
+            )
+            == 14
+        )
+
+
 class TestResolveCalendar:
     def test_crypto_is_always_open(self):
         assert isinstance(resolve_calendar(AssetClass.CRYPTO), AlwaysOpenCalendar)
 
-    def test_non_crypto_is_weekend_closed(self):
+    def test_forex_and_metals_use_new_york_rollover(self):
+        assert isinstance(resolve_calendar(AssetClass.FOREX), SessionCalendar)
+        assert isinstance(resolve_calendar(AssetClass.METAL), SessionCalendar)
+
+    def test_other_asset_classes_fall_back_to_weekend_closed(self):
         for asset_class in (
-            AssetClass.FOREX,
-            AssetClass.METAL,
             AssetClass.EQUITY,
             AssetClass.BOND,
             AssetClass.INDEX,

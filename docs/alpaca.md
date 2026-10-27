@@ -28,7 +28,7 @@ Symbols: `AAPL` (stocks), `BTC/USD` (crypto).
 
 | Capability | Supported | Notes |
 |---|---|---|
-| `fetch_ohlcv` | ✅ | All 9 canonical timeframes native; `columns="basic"/"all"/[...]`; `feed` (`iex` default, `sip` paid); `adjustment` `raw`/`split`/`dividend`/`all` for equities; `is_closed` derived; UTC bar-open anchor |
+| `fetch_ohlcv` | ✅ | All 12 canonical timeframes native; `columns="basic"/"all"/[...]`; `feed` (`iex` default, `sip` paid); `adjustment` `raw`/`split`/`dividend`/`all` for equities; `is_closed` derived from the bar's session close; bar-open anchor (daily and larger moved to the session open) |
 | `fetch_ticks` (historical) | ✅ | REST trades → canonical `Trade` (`side` always None — the feed carries none); with `start` the whole range is paged, without it `limit` caps the most recent trades; often paid-tier gated → honest `PaidTierRequiredError` |
 | `stream_trades` | ✅ | Async generator over the official SDK streams; stocks + `BTC/USD`-style crypto |
 | `fetch_orderbook_snapshot` / `stream_orderbook` | ❌ | Quotes carry one best bid/ask (NBBO), not depth levels; `NotSupportedError` by design |
@@ -38,9 +38,9 @@ Symbols: `AAPL` (stocks), `BTC/USD` (crypto).
 
 ## Timeframes
 
-`1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w, 1mo` → Alpaca `TimeFrame`
+`1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 1w, 1mo` → Alpaca `TimeFrame`
 (`1Min…1Month`). Unknown timeframe → `InvalidTimeframeError`. A non-native
-target would be derived by resampling (design doc sec 8); all nine are
+target would be derived by resampling (design doc sec 8); all twelve are
 native today so the fallback sleeps.
 
 ## Asset classes
@@ -66,6 +66,14 @@ have no `session` column at all — an all-`None` column would imply a session
 boundary that does not exist. Requesting `columns=["session"]` for crypto
 raises `ValueError`.
 
+Equity request boundaries follow the XNYS calendar: holidays and half days
+come from `exchange_calendars` when the `calendar` extra is installed, and the
+built-in weekend calendar otherwise. Alpaca labels daily and larger bars by
+calendar date, so the adapter moves those timestamps to the session open
+(for example 05:00 UTC becomes 14:30 UTC on a regular January day) before the
+fetch contract runs. Crypto uses the 24/7 calendar and keeps UTC-midnight
+period boundaries.
+
 ## Paper vs live
 
 Paper mode affects order execution, never market data. Bars are identical on
@@ -80,6 +88,11 @@ Crypto closed bars are effectively never revised; equities are restated
 (corrections, corporate actions). No local cache is kept — every fetch
 returns the provider's latest truth. `adjustment="raw"` (default) requests
 unadjusted equity bars.
+
+The frame records the data semantics, so downstream code can tell what it
+received: `df.attrs["volume_type"]` (`"shares"` for equities, `"base"` for
+crypto), `df.attrs["price_adjustment"]` (`"raw"` or `"split_and_dividend"`),
+and `df.attrs["data_tier"]` (the `feed`, e.g. `"iex"`).
 
 ## Output format
 

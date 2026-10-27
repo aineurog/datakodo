@@ -26,6 +26,10 @@ class MassiveConfig(BaseSettings):
     """Massive API key. Public market data always needs a key (unlike Binance);
 
     validated lazily - raised only when a call actually needs it."""
+    data_tier: str = "free"
+    """Subscription tier the key belongs to (``free``/``paid``). Recorded on
+    instrument descriptors and returned frames so callers know the data
+    depth and delay they are getting (design doc sec 22)."""
     base_url: str = "https://api.massive.com"
     """Massive REST base URL (rebranded from api.polygon.io on 2025-10-30)."""
     timeout: float = 10.0

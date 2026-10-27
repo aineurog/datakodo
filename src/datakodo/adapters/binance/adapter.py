@@ -21,10 +21,21 @@ from datakodo.adapters.binance.mapper import (
 )
 from datakodo.adapters.binance.rest import BinanceREST
 from datakodo.adapters.binance.ws import BinanceWS
+from datakodo.core.calendar import CRYPTO_UTC, AlwaysOpenCalendar
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
+from datakodo.core.enums import (
+    AssetClass,
+    InstrumentType,
+    PriceAdjustment,
+    Timeframe,
+    VolumeType,
+)
 from datakodo.core.exceptions import DataNotAvailableError
-from datakodo.core.instruments import CryptoPerpetualExtension, Instrument
+from datakodo.core.instruments import (
+    CryptoPerpetualExtension,
+    Instrument,
+    InstrumentCapabilities,
+)
 from datakodo.core.interfaces import AdapterInterface, symbol_of
 from datakodo.core.schemas import (
     OrderBook,
@@ -36,9 +47,28 @@ from datakodo.core.timeframe import BINANCE_MAP
 from datakodo.ops.output import to_output_format
 from datakodo.ops.pagination import paginate
 from datakodo.ops.resample import pick_source_timeframe, resample
-from datakodo.ops.validation import add_is_closed, validate_ohlcv
+from datakodo.ops.validation import apply_fetch_contract, validate_ohlcv
 
 logger = logging.getLogger(__name__)
+
+_BINANCE_CAPABILITIES = InstrumentCapabilities(
+    ohlcv=True,
+    ticks=True,
+    orderbook_snapshot=True,
+    streaming_ticks=True,
+    streaming_orderbook=True,
+    fundamentals=True,
+)
+
+
+def _annotate(df) -> None:
+    """Record Binance's data semantics on the returned frame (sec 18)."""
+    df.attrs.update(
+        volume_type=VolumeType.BASE.value,
+        price_adjustment=PriceAdjustment.RAW.value,
+        data_tier="free",
+        calendar="CRYPTO_UTC",
+    )
 
 
 class BinanceAdapter(AdapterInterface):
@@ -54,6 +84,8 @@ class BinanceAdapter(AdapterInterface):
     supports_streaming_orderbook = True
     supports_streaming_ticks = True
     supports_fundamentals = True
+    supports_real_volume = True
+    supports_adjusted_prices = False
 
     native_timeframes: tuple[Timeframe, ...] = tuple(Timeframe)
     """Binance offers every canonical timeframe natively, so no resampling is
@@ -98,6 +130,12 @@ class BinanceAdapter(AdapterInterface):
                 instrument_type=InstrumentType.PERPETUAL,
                 exchange="Binance",
                 currency=currency,
+                volume_type=VolumeType.BASE,
+                session_profile=CRYPTO_UTC,
+                calendar="CRYPTO_UTC",
+                data_tier="free",
+                price_adjustment=PriceAdjustment.RAW,
+                capabilities=_BINANCE_CAPABILITIES,
                 crypto_perpetual=CryptoPerpetualExtension(contract_size=1.0),
             )
         return Instrument(
@@ -107,6 +145,12 @@ class BinanceAdapter(AdapterInterface):
             instrument_type=InstrumentType.SPOT,
             exchange="Binance",
             currency=currency,
+            volume_type=VolumeType.BASE,
+            session_profile=CRYPTO_UTC,
+            calendar="CRYPTO_UTC",
+            data_tier="free",
+            price_adjustment=PriceAdjustment.RAW,
+            capabilities=_BINANCE_CAPABILITIES,
         )
 
     def search_instruments(  # type: ignore[override]
@@ -151,6 +195,14 @@ class BinanceAdapter(AdapterInterface):
         """Build an Instrument from a raw ``exchangeInfo`` symbol entry."""
         symbol = entry.get("symbol", "")
         inst_type = InstrumentType.PERPETUAL if market_type == "futures" else InstrumentType.SPOT
+        tick_size = 0.0
+        for item in entry.get("filters") or []:
+            if item.get("filterType") == "PRICE_FILTER" and item.get("tickSize") is not None:
+                tick_size = float(item["tickSize"])
+                break
+        precision = entry.get("pricePrecision")
+        if precision is None:
+            precision = entry.get("quoteAssetPrecision")
         return Instrument(
             symbol=symbol,
             provider_symbol=symbol,
@@ -158,6 +210,14 @@ class BinanceAdapter(AdapterInterface):
             instrument_type=inst_type,
             exchange="Binance",
             currency=entry.get("quoteAsset") or quote_asset(symbol),
+            volume_type=VolumeType.BASE,
+            tick_size=tick_size,
+            price_precision=int(precision) if precision is not None else None,
+            session_profile=CRYPTO_UTC,
+            calendar="CRYPTO_UTC",
+            data_tier="free",
+            price_adjustment=PriceAdjustment.RAW,
+            capabilities=_BINANCE_CAPABILITIES,
         )
 
     # -- historical (sync) --
@@ -211,7 +271,15 @@ class BinanceAdapter(AdapterInterface):
             source = self._fetch_ohlcv_native(
                 symbol, source_tf.value, start, end, market_type, include_live=False
             )
-            df = resample(source, tf)
+            df = resample(
+                source,
+                tf,
+                source_timeframe=source_tf,
+                calendar=AlwaysOpenCalendar(),
+                start=start,
+                end=end,
+                incomplete="drop",
+            )
             validate_ohlcv(df)
             logger.info(
                 "Resampled %s -> %s (%d bars) for %s %s",
@@ -222,6 +290,7 @@ class BinanceAdapter(AdapterInterface):
                 symbol,
             )
 
+        _annotate(df)
         available = available_ohlcv_extras(df.columns)
         resolved = resolve_ohlcv_columns(columns, available)
         return to_output_format(df[resolved], output_format or self._config.output_format)
@@ -252,10 +321,7 @@ class BinanceAdapter(AdapterInterface):
             return map_ohlcv(raw)
 
         df = paginate(_fetch_chunk, symbol, tf, start, end)
-        df = add_is_closed(df, timeframe)
-
-        if not include_live:
-            df = df.loc[df["is_closed"]].reset_index(drop=True)
+        df = apply_fetch_contract(df, timeframe, start, end, closed_only=not include_live)
 
         if df.empty:
             raise DataNotAvailableError(
@@ -263,7 +329,6 @@ class BinanceAdapter(AdapterInterface):
                 f"in [{start.isoformat()}, {end.isoformat()}]."
             )
 
-        validate_ohlcv(df)
         logger.info("Fetched %d %s OHLCV rows for %s %s", len(df), timeframe, market_type, symbol)
         return df
 

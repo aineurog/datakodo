@@ -19,8 +19,9 @@ from datakodo.adapters.mt5.mapper import (
 )
 from datakodo.adapters.mt5.rest import MT5REST, _as_utc
 from datakodo.adapters.mt5.terminal import MT5Terminal
+from datakodo.core.calendar import CME_GLOBEX, FX_NY17, METALS_NY17
 from datakodo.core.config import Config
-from datakodo.core.enums import AssetClass, InstrumentType, Timeframe
+from datakodo.core.enums import AssetClass, InstrumentType, Timeframe, VolumeType
 from datakodo.core.exceptions import (
     ConnectionError,
     DataNotAvailableError,
@@ -709,6 +710,49 @@ class TestMapInstrument:
         inst = map_instrument("USDJPY", info)
         assert inst.forex.pip_size == 0.01
 
+    def test_forex_metadata(self):
+        inst = map_instrument("EURUSD", _symbol_info())
+        assert inst.volume_type is VolumeType.TICK
+        assert inst.session_profile is FX_NY17
+        assert inst.calendar == "FX_NY17"
+        assert inst.contract_multiplier == 100_000.0
+        assert inst.tick_size == 1e-05
+        assert inst.price_precision == 5
+        assert inst.data_tier == "broker"
+        assert inst.capabilities.real_volume is True
+
+    def test_real_volume_baseline_is_distinct_from_tick_volume(self):
+        tick = map_instrument("EURUSD", _symbol_info())
+        real = map_instrument("EURUSD", _symbol_info(), volume="real_volume")
+        assert tick.volume_type is VolumeType.TICK
+        assert real.volume_type is VolumeType.CONTRACTS
+
+    def test_metal_and_futures_session_profiles(self):
+        metal = map_instrument(
+            "XAUUSD",
+            _symbol_info(
+                name="XAUUSD",
+                path="Metals\\XAUUSD",
+                currency_base="XAU",
+                currency_profit="USD",
+            ),
+        )
+        assert metal.session_profile is METALS_NY17
+        assert metal.calendar == "METALS_NY17"
+
+        future = map_instrument(
+            "GCZ24",
+            _symbol_info(
+                name="GCZ24",
+                path="Futures\\GCZ24",
+                trade_calc_mode=33,
+                expiration_time=1734393600,
+            ),
+            futures_modes=frozenset({33}),
+        )
+        assert future.session_profile is CME_GLOBEX
+        assert future.calendar == "CME_GLOBEX"
+
     def test_metal_via_base_currency(self):
         info = _symbol_info(
             name="XAUUSD",
@@ -867,15 +911,6 @@ class TestMapFundamentals:
             map_fundamentals("EURUSD", None)
 
 
-def _mark_last_bar_open(df: pd.DataFrame, timeframe: str, **kwargs) -> pd.DataFrame:
-    """Wrap ``add_is_closed`` but force the last bar to be still forming."""
-    from datakodo.ops.validation import add_is_closed
-
-    out = add_is_closed(df, timeframe, **kwargs)
-    out.iloc[-1, out.columns.get_loc("is_closed")] = False
-    return out
-
-
 class TestMT5Adapter:
     def test_adapter_capabilities(self):
         adapter = MT5Adapter()
@@ -901,19 +936,34 @@ class TestMT5Adapter:
         adapter.connect()
         return adapter
 
-    def _fetch(self, fake_mt5, *, columns, info=None, include_live=False, output_format=None):
+    def _fetch(
+        self,
+        fake_mt5,
+        *,
+        columns,
+        info=None,
+        include_live=False,
+        output_format=None,
+        now=None,
+        volume="tick_volume",
+    ):
         if info is not None:
             fake_mt5.info = info
         adapter = self._connected_adapter(fake_mt5)
+        if now is not None:
+            # Pin the server clock so a bar at a fixed date can be still forming.
+            adapter._rest.server_offset_seconds = lambda symbol: 0
+            adapter._rest.server_now = lambda symbol, **_: now
         start = datetime(2026, 1, 1, tzinfo=UTC)
         return adapter.fetch_ohlcv(
             "EURUSD",
-            "1h",
+            "1m",
             start,
             start + timedelta(days=2),
             columns=columns,
             include_live=include_live,
             output_format=output_format,
+            volume=volume,
         )
 
     def test_fetch_ohlcv_basic_columns(self, fake_mt5):
@@ -928,6 +978,31 @@ class TestMT5Adapter:
             "is_closed",
         ]
         assert len(df) == 2880  # fake module emits 1 bar per minute over 2 days
+
+    def test_daily_bars_anchor_at_the_tradable_session_open(self, fake_mt5):
+        """Server-midnight labels move to the FX session open (design sec 10)."""
+        fake_mt5.step = 86400
+        adapter = self._connected_adapter(fake_mt5)
+        adapter._rest.server_offset_seconds = lambda symbol: 0
+        adapter._rest.server_now = lambda symbol, **_: datetime(2026, 1, 3, tzinfo=UTC)
+        start = datetime(2025, 12, 31, tzinfo=UTC)
+        df = adapter.fetch_ohlcv("EURUSD", "1d", start, start + timedelta(days=3))
+        # The 17:00 New York session open is 22:00 UTC in December. The raw
+        # Dec 31 label anchors before the request start, so the half-open
+        # window drops it.
+        assert df["timestamp"].tolist() == [
+            datetime(2025, 12, 31, 22, 0, tzinfo=UTC),
+            datetime(2026, 1, 1, 22, 0, tzinfo=UTC),
+        ]
+
+    def test_fetch_ohlcv_records_volume_semantics(self, fake_mt5):
+        tick = self._fetch(fake_mt5, columns="basic")
+        assert tick.attrs["volume_type"] == VolumeType.TICK.value
+        assert tick.attrs["price_adjustment"] == "raw"
+        assert tick.attrs["data_tier"] == "broker"
+
+        real = self._fetch(fake_mt5, columns="basic", volume="real_volume")
+        assert real.attrs["volume_type"] == VolumeType.CONTRACTS.value
 
     def test_fetch_ohlcv_selects_symbol_before_rates(self, fake_mt5):
         """The symbol is added to MarketWatch first, so MT5 downloads its history."""
@@ -965,12 +1040,33 @@ class TestMT5Adapter:
         with pytest.raises(ValueError, match="not available"):
             self._fetch(fake_mt5, columns=["session"])
 
-    def test_adapter_uses_weekend_closed_calendar(self, fake_mt5):
-        """MT5 is a weekend-closed venue, so gap detection skips those closures."""
-        from datakodo.core.calendar import WeekendClosedCalendar
+    def test_adapter_resolves_each_instrument_period_model(self, fake_mt5):
+        """Forex/metals use the NY17 rollover; futures use CME Globex."""
+        from datakodo.core.calendar import SessionCalendar
 
         adapter = self._connected_adapter(fake_mt5)
-        assert isinstance(adapter._calendar(), WeekendClosedCalendar)
+
+        fake_mt5.info = _symbol_info()
+        session, calendar = adapter._period_context("EURUSD")
+        assert session is FX_NY17
+        assert isinstance(calendar, SessionCalendar)
+        assert calendar.profile is FX_NY17
+
+        fake_mt5.info = _symbol_info(name="XAUUSD", path="Metals\\XAUUSD", currency_base="XAU")
+        session, calendar = adapter._period_context("XAUUSD")
+        assert session is METALS_NY17
+        assert isinstance(calendar, SessionCalendar)
+
+        fake_mt5.info = _symbol_info(
+            name="DXY_U6",
+            path="Futures\\DXY_U6",
+            exchange="CME",
+            trade_calc_mode=1,
+            expiration_time=1789516800,
+        )
+        session, calendar = adapter._period_context("DXY_U6")
+        assert session is CME_GLOBEX
+        assert session is not None
 
     def test_fetch_ohlcv_explicit_raw_extra(self, fake_mt5):
         df = self._fetch(fake_mt5, columns=["spread"])
@@ -1101,15 +1197,15 @@ class TestMT5Adapter:
         with pytest.raises(RetriesExhaustedError):
             adapter.fetch_ohlcv("EURUSD", "1h", start, start + timedelta(days=2))
 
-    def test_fetch_ohlcv_default_drops_forming_bar(self, fake_mt5, monkeypatch):
-        monkeypatch.setattr("datakodo.adapters.mt5.adapter.add_is_closed", _mark_last_bar_open)
-        df = self._fetch(fake_mt5, columns="basic")
+    def test_fetch_ohlcv_default_drops_forming_bar(self, fake_mt5):
+        forming_now = datetime(2026, 1, 2, 23, 59, 30, tzinfo=UTC)
+        df = self._fetch(fake_mt5, columns="basic", now=forming_now)
         assert len(df) == 2879  # 2880 bars minus the still-forming one
         assert df["is_closed"].all()
 
-    def test_fetch_ohlcv_include_live_keeps_forming_bar(self, fake_mt5, monkeypatch):
-        monkeypatch.setattr("datakodo.adapters.mt5.adapter.add_is_closed", _mark_last_bar_open)
-        df = self._fetch(fake_mt5, columns="basic", include_live=True)
+    def test_fetch_ohlcv_include_live_keeps_forming_bar(self, fake_mt5):
+        forming_now = datetime(2026, 1, 2, 23, 59, 30, tzinfo=UTC)
+        df = self._fetch(fake_mt5, columns="basic", include_live=True, now=forming_now)
         assert len(df) == 2880
         assert not df["is_closed"].iloc[-1]
 
